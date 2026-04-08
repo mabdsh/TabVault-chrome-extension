@@ -16,6 +16,7 @@ const state = {
   bookmarkPath: [],
   recentTabs: [],
   lockedUrls: new Set(),
+  readingList: [],
   currentWindowId: null,
 };
 
@@ -28,13 +29,14 @@ async function init() {
 
 async function loadAll() {
   try {
-    const [tabsData, sessions, tree, dups, recent, locked, currentTab] = await Promise.all([
+    const [tabsData, sessions, tree, dups, recent, locked, reading, currentTab] = await Promise.all([
       send('GET_ALL_TABS'),
       send('GET_ALL_SESSIONS'),
       send('GET_BOOKMARK_TREE'),
       send('FIND_DUPLICATES'),
       send('GET_RECENT_TABS'),
       send('GET_LOCKED_URLS'),
+      send('GET_READING_LIST'),
       chrome.tabs.query({ active: true, currentWindow: true }),
     ]);
     state.tabs          = tabsData?.tabs    || [];
@@ -46,6 +48,7 @@ async function loadAll() {
     state.duplicates    = dups    || [];
     state.recentTabs    = recent  || [];
     state.lockedUrls    = new Set(locked || []);
+    state.readingList   = reading || [];
     state.currentWindowId = currentTab?.[0]?.windowId ?? null;
     updateCounts();
   } catch (e) {
@@ -62,12 +65,17 @@ function flatten(nodes, out) {
 }
 
 function updateCounts() {
-  $('#pillTabs').textContent = state.tabs.length;
+  $('#pillTabs').textContent     = state.tabs.length;
   $('#pillSessions').textContent = state.sessions.length;
   const dupTotal = state.duplicates.reduce((a, b) => a + (b.tabs.length - 1), 0);
   const badge = $('#dupBadge');
   if (dupTotal > 0) { badge.hidden = false; badge.textContent = dupTotal; }
   else badge.hidden = true;
+  const readBadge = $('#pillReading');
+  if (readBadge) {
+    if (state.readingList.length > 0) { readBadge.hidden = false; readBadge.textContent = state.readingList.length; }
+    else readBadge.hidden = true;
+  }
   renderFooter();
 }
 
@@ -129,9 +137,10 @@ function setView(view) {
 function render() {
   const body = $('#popupBody');
   body.innerHTML = '';
-  if (state.view === 'tabs') renderTabs(body);
-  else if (state.view === 'sessions') renderSessions(body);
+  if (state.view === 'tabs')      renderTabs(body);
+  else if (state.view === 'sessions')  renderSessions(body);
   else if (state.view === 'bookmarks') renderBookmarks(body);
+  else if (state.view === 'reading')   renderReadingList(body);
 }
 
 // ---------- TABS view ----------
@@ -457,7 +466,7 @@ function bookmarkRow(bm) {
 }
 
 // ---------- SEARCH ----------
-function renderSearch() {
+async function renderSearch() {
   const body = $('#popupBody');
   body.innerHTML = '';
   if (typeof Fuse === 'undefined') {
@@ -465,21 +474,97 @@ function renderSearch() {
     return;
   }
   const fuseTabs = new Fuse(state.tabs, { keys: ['title', 'url'], threshold: 0.4 });
-  const fuseBm = new Fuse(state.flatBookmarks, { keys: ['title', 'url'], threshold: 0.4 });
+  const fuseBm   = new Fuse(state.flatBookmarks, { keys: ['title', 'url'], threshold: 0.4 });
   const tabResults = fuseTabs.search(state.searchQuery).slice(0, 8);
-  const bmResults = fuseBm.search(state.searchQuery).slice(0, 12);
+  const bmResults  = fuseBm.search(state.searchQuery).slice(0, 10);
 
-  if (tabResults.length === 0 && bmResults.length === 0) {
+  // History results — direct chrome.history API (extension page has access)
+  let historyItems = [];
+  try {
+    const raw = await chrome.history.search({
+      text: state.searchQuery, maxResults: 10,
+      startTime: Date.now() - 30 * 24 * 60 * 60 * 1000,
+    });
+    const openUrls = new Set(state.tabs.map((t) => t.url));
+    historyItems = raw.filter((h) => !openUrls.has(h.url));
+  } catch {}
+
+  if (!tabResults.length && !bmResults.length && !historyItems.length) {
     body.appendChild(emptyState('No results', `Nothing found for "${state.searchQuery}"`));
     return;
   }
   if (tabResults.length) {
-    body.appendChild(el('div', { class: 'section-title' }, `🗂  Open tabs (${tabResults.length})`));
+    body.appendChild(el('div', { class: 'section-title' }, `Open tabs (${tabResults.length})`));
     for (const r of tabResults) body.appendChild(tabRow(r.item));
   }
   if (bmResults.length) {
-    body.appendChild(el('div', { class: 'section-title' }, `🔖  Bookmarks (${bmResults.length})`));
+    body.appendChild(el('div', { class: 'section-title' }, `Bookmarks (${bmResults.length})`));
     for (const r of bmResults) body.appendChild(bookmarkRow(r.item));
+  }
+  if (historyItems.length) {
+    body.appendChild(el('div', { class: 'section-title' }, `History (${historyItems.length})`));
+    for (const h of historyItems) {
+      const row = el('div', { class: 'row' });
+      const fav = el('img', { class: 'fav', src: `https://www.google.com/s2/favicons?domain=${getDomain(h.url)}&sz=32`, alt: '' });
+      fav.onerror = () => { fav.src = defaultFaviconDataUri(); };
+      row.appendChild(fav);
+      row.appendChild(el('div', { class: 'meta' }, [
+        el('div', { class: 'title' }, h.title || h.url),
+        el('div', { class: 'sub' }, getDomain(h.url)),
+      ]));
+      row.appendChild(el('span', { class: 'history-pill' }, 'history'));
+      row.addEventListener('click', async () => { await chrome.tabs.create({ url: h.url }); window.close(); });
+      body.appendChild(row);
+    }
+  }
+}
+
+// ---------- READING LIST view ----------
+function renderReadingList(body) {
+  if (state.readingList.length === 0) {
+    body.appendChild(emptyState('Reading list is empty', 'Right-click any page or use the book icon in a tab row'));
+    return;
+  }
+  body.appendChild(el('div', { class: 'section-title' }, [
+    `Saved to read (${state.readingList.length})`,
+    el('button', {
+      onclick: async () => {
+        await send('CLEAR_READING_LIST');
+        toast('Reading list cleared', 'success');
+        await loadAll(); render();
+      },
+    }, 'Clear all'),
+  ]));
+  for (const item of state.readingList) {
+    const card = el('div', { class: 'reading-card-mini' });
+    const fav = el('img', {
+      class: 'fav',
+      src: item.favIconUrl || `https://www.google.com/s2/favicons?domain=${getDomain(item.url)}&sz=32`,
+      alt: '',
+    });
+    fav.onerror = () => { fav.src = defaultFaviconDataUri(); };
+    card.appendChild(fav);
+    card.appendChild(el('div', { class: 'meta' }, [
+      el('div', { class: 'title' }, item.title || item.url),
+      el('div', { class: 'sub' }, getDomain(item.url)),
+    ]));
+    const actions = el('div', { class: 'actions' });
+    actions.appendChild(el('button', {
+      title: 'Remove from list',
+      class: 'danger',
+      onclick: async (e) => {
+        e.stopPropagation();
+        await send('REMOVE_FROM_READING_LIST', { id: item.id });
+        await loadAll(); render();
+      },
+    }, '✕'));
+    card.appendChild(actions);
+    card.addEventListener('click', async () => {
+      await chrome.tabs.create({ url: item.url });
+      await send('REMOVE_FROM_READING_LIST', { id: item.id });
+      window.close();
+    });
+    body.appendChild(card);
   }
 }
 
@@ -501,9 +586,9 @@ function attachListeners() {
   }));
 
   // Search
-  $('#popupSearch').addEventListener('input', debounce((e) => {
+  $('#popupSearch').addEventListener('input', debounce(async (e) => {
     state.searchQuery = e.target.value.trim();
-    if (state.searchQuery) renderSearch();
+    if (state.searchQuery) await renderSearch();
     else render();
   }, 200));
   $('#popupSearch').addEventListener('keydown', (e) => {
@@ -525,16 +610,11 @@ function attachListeners() {
     await loadAll();
     render();
   });
-  $('#bookmarkTabBtn').addEventListener('click', async () => {
+  $('#readLaterBtn').addEventListener('click', async () => {
     const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
     if (!tab) return;
-    try {
-      await send('CREATE_BOOKMARK', { title: tab.title, url: tab.url });
-      toast('Bookmark added', 'success');
-      await loadAll();
-    } catch (e) {
-      toast('Failed: ' + e.message, 'error');
-    }
+    const ok = await send('SAVE_TO_READING_LIST', { url: tab.url, title: tab.title, favIconUrl: tab.favIconUrl });
+    toast(ok ? 'Saved to Reading List' : 'Already in Reading List', ok ? 'success' : 'info');
   });
   $('#closeDupsBtn').addEventListener('click', async () => {
     const dupTotal = state.duplicates.reduce((a, b) => a + (b.tabs.length - 1), 0);

@@ -11,9 +11,13 @@ const state = {
   groups: [],
   windows: [],
   windowFilter: null,
-  recentTabs: [],            // recently closed tabs from chrome.sessions
-  lockedUrls: new Set(),     // URLs that are locked (reopen on close)
-  showRecentlyClosed: false, // toggle for recently-closed section
+  recentTabs: [],
+  lockedUrls: new Set(),
+  showRecentlyClosed: false,
+  readingList: [],
+  workspaces: [],
+  domainSummary: [],
+  analytics: null,
   sessions: [],
   bookmarkTree: [],
   bookmarkMeta: {},
@@ -38,7 +42,7 @@ function render() {
   main.innerHTML = '';
   try {
     if (state.searchQuery) {
-      renderSearch();
+      renderSearch(); // intentionally not awaited — renders incrementally
     } else {
       views[state.view]?.(main);
     }
@@ -159,7 +163,7 @@ function setupScanProgressListener() {
 
 async function refreshAll() {
   try {
-    const [tabsData, sessions, tree, meta, dups, recent, locked] = await Promise.all([
+    const [tabsData, sessions, tree, meta, dups, recent, locked, reading, workspaces, domainSummary] = await Promise.all([
       send('GET_ALL_TABS', { windowId: state.windowFilter }),
       send('GET_ALL_SESSIONS'),
       send('GET_BOOKMARK_TREE'),
@@ -167,25 +171,41 @@ async function refreshAll() {
       send('FIND_DUPLICATES'),
       send('GET_RECENT_TABS'),
       send('GET_LOCKED_URLS'),
+      send('GET_READING_LIST'),
+      send('GET_WORKSPACES'),
+      send('GET_DOMAIN_SUMMARY'),
     ]);
-    state.tabs        = tabsData.tabs    || [];
-    state.groups      = tabsData.groups  || [];
-    state.windows     = tabsData.windows || [];
-    state.sessions    = sessions  || [];
-    state.bookmarkTree   = tree   || [];
-    state.bookmarkMeta   = meta   || {};
-    state.duplicates     = dups   || [];
-    state.recentTabs     = recent || [];
-    state.lockedUrls     = new Set(locked || []);
+    state.tabs           = tabsData.tabs    || [];
+    state.groups         = tabsData.groups  || [];
+    state.windows        = tabsData.windows || [];
+    state.sessions       = sessions         || [];
+    state.bookmarkTree   = tree             || [];
+    state.bookmarkMeta   = meta             || {};
+    state.duplicates     = dups             || [];
+    state.recentTabs     = recent           || [];
+    state.lockedUrls     = new Set(locked   || []);
+    state.readingList    = reading          || [];
+    state.workspaces     = workspaces       || [];
+    state.domainSummary  = domainSummary    || [];
     state.flatBookmarks  = [];
     flatten(state.bookmarkTree, state.flatBookmarks);
 
-    $('#navTabCount').textContent = state.tabs.length;
+    $('#navTabCount').textContent  = state.tabs.length;
     $('#navSessionCount').textContent = state.sessions.length;
+
     const dupTotal = state.duplicates.reduce((a, b) => a + (b.tabs.length - 1), 0);
     const dupBadge = $('#navDupCount');
     if (dupTotal > 0) { dupBadge.hidden = false; dupBadge.textContent = dupTotal; }
     else dupBadge.hidden = true;
+
+    const readBadge = $('#navReadingCount');
+    if (state.readingList.length > 0) { readBadge.hidden = false; readBadge.textContent = state.readingList.length; }
+    else readBadge.hidden = true;
+
+    const wsBadge = $('#navWsCount');
+    if (state.workspaces.length > 0) { wsBadge.hidden = false; wsBadge.textContent = state.workspaces.length; }
+    else wsBadge.hidden = true;
+
   } catch (e) {
     console.error('[TabVault] refresh failed:', e);
     toast('Failed to load data', 'error');
@@ -374,7 +394,41 @@ function renderTabList(container) {
     for (const t of tabs) container.appendChild(tabRow(t));
   }
 
-  for (const t of ungrouped) container.appendChild(tabRow(t));
+  // Ungrouped tabs — show as domain clusters with close-by-domain button
+  if (ungrouped.length > 0) {
+    const byDomain = new Map();
+    for (const t of ungrouped) {
+      try {
+        const domain = new URL(t.url).hostname.replace(/^www\./, '');
+        if (!byDomain.has(domain)) byDomain.set(domain, []);
+        byDomain.get(domain).push(t);
+      } catch {
+        if (!byDomain.has('other')) byDomain.set('other', []);
+        byDomain.get('other').push(t);
+      }
+    }
+    for (const [domain, tabs] of byDomain) {
+      if (tabs.length > 1) {
+        // Show a domain cluster header with close-all button
+        const hdr = el('div', { class: 'group-header domain-header' }, [
+          el('span', { class: 'domain-label' }, domain),
+          el('span', { class: 'folder-count' }, `${tabs.length}`),
+          el('button', {
+            class: 'btn btn-icon btn-ghost close-domain-btn',
+            title: `Close all ${tabs.length} ${domain} tabs`,
+            onclick: async (e) => {
+              e.stopPropagation();
+              const n = await send('CLOSE_TABS_BY_DOMAIN', { domain });
+              toast(`Closed ${n} ${domain} tab${n === 1 ? '' : 's'}`, 'success');
+              await refreshAll(); render();
+            },
+          }, '✕'),
+        ]);
+        container.appendChild(hdr);
+      }
+      for (const t of tabs) container.appendChild(tabRow(t));
+    }
+  }
 }
 
 function renderRecentlyClosed() {
@@ -475,6 +529,7 @@ function renderRecentlyClosed() {
 
   for (const t of ungrouped) container.appendChild(tabRow(t));
 
+
 function tabRow(tab) {
   const isSuspended = tab.url?.includes('suspended.html');
   const isSelected  = state.selectedTabIds.has(tab.id);
@@ -543,6 +598,21 @@ function tabRow(tab) {
   }
 
   const actions = el('div', { class: 'actions' }, [
+    el('button', {
+      class: 'btn btn-icon btn-ghost',
+      title: 'Save to Reading List',
+      onclick: async (e) => {
+        e.stopPropagation();
+        const ok = await send('SAVE_TO_READING_LIST', { url: tab.url, title: tab.title, favIconUrl: tab.favIconUrl });
+        toast(ok ? 'Saved to Reading List' : 'Already in Reading List', ok ? 'success' : 'info');
+      },
+    }, (() => {
+      const ns = 'http://www.w3.org/2000/svg';
+      const svg = document.createElementNS(ns, 'svg');
+      svg.setAttribute('class', 'icon'); svg.setAttribute('viewBox', '0 0 24 24');
+      svg.innerHTML = '<path d="M2 3h6a4 4 0 014 4v14a3 3 0 00-3-3H2z"/><path d="M22 3h-6a4 4 0 00-4 4v14a3 3 0 013-3h7z"/>';
+      return svg;
+    })()),
     // Lock / Unlock button — always visible when locked
     el('button', {
       class: 'btn btn-icon btn-ghost lock-btn' + (isLocked ? ' locked' : ''),
@@ -1212,32 +1282,59 @@ function handleSearchNav(e) {
   e.preventDefault();
 }
 
-function renderSearch() {
+async function renderSearch() {
   const main = $('#main');
-  // main was already cleared by render()
   const panel = el('div', { class: 'panel' });
-  const body = el('div', { class: 'panel-body' });
+  const body  = el('div', { class: 'panel-body' });
 
   if (!buildFuseIndex()) {
     body.appendChild(emptyState('Search unavailable', 'Fuse.js failed to load. Reload the extension.'));
-    panel.appendChild(body);
-    main.appendChild(panel);
+    panel.appendChild(body); main.appendChild(panel);
     return;
   }
 
   const tabResults = fuseTabs.search(state.searchQuery).slice(0, 20);
-  const bmResults = fuseBookmarks.search(state.searchQuery).slice(0, 30);
+  const bmResults  = fuseBookmarks.search(state.searchQuery).slice(0, 30);
 
-  if (tabResults.length === 0 && bmResults.length === 0) {
+  // Browser history — direct chrome.history API call (extension pages have access)
+  let historyItems = [];
+  try {
+    historyItems = await chrome.history.search({
+      text:      state.searchQuery,
+      maxResults: 20,
+      startTime: Date.now() - 30 * 24 * 60 * 60 * 1000,
+    });
+    // Filter out URLs already shown as open tabs
+    const openUrls = new Set(state.tabs.map((t) => t.url));
+    historyItems = historyItems.filter((h) => !openUrls.has(h.url));
+  } catch { historyItems = []; }
+
+  if (!tabResults.length && !bmResults.length && !historyItems.length) {
     body.appendChild(emptyState('No results', `Nothing found for "${state.searchQuery}". Try different keywords.`));
   } else {
     if (tabResults.length) {
-      body.appendChild(el('div', { class: 'search-section-header' }, `🗂  OPEN TABS (${tabResults.length})`));
+      body.appendChild(el('div', { class: 'search-section-header' }, `Open tabs  (${tabResults.length})`));
       for (const r of tabResults) body.appendChild(tabRow(r.item));
     }
     if (bmResults.length) {
-      body.appendChild(el('div', { class: 'search-section-header' }, `🔖  BOOKMARKS (${bmResults.length})`));
+      body.appendChild(el('div', { class: 'search-section-header' }, `Bookmarks  (${bmResults.length})`));
       for (const r of bmResults) body.appendChild(bookmarkRow(r.item.bm));
+    }
+    if (historyItems.length) {
+      body.appendChild(el('div', { class: 'search-section-header' }, `History  (${historyItems.length})`));
+      for (const h of historyItems) {
+        const row = el('div', { class: 'row history-row' });
+        const fav = el('img', { class: 'fav', src: `https://www.google.com/s2/favicons?domain=${getDomain(h.url)}&sz=32`, alt: '' });
+        fav.onerror = () => { fav.src = defaultFaviconDataUri(); };
+        row.appendChild(fav);
+        row.appendChild(el('div', { class: 'meta' }, [
+          el('div', { class: 'title' }, h.title || h.url),
+          el('div', { class: 'sub' }, getDomain(h.url)),
+        ]));
+        row.appendChild(el('span', { class: 'history-badge' }, 'history'));
+        row.addEventListener('click', () => chrome.tabs.create({ url: h.url }));
+        body.appendChild(row);
+      }
     }
   }
   panel.appendChild(body);
@@ -1266,6 +1363,312 @@ function iconSvg(d, size = 16) {
   p.setAttribute('d', d);
   svg.appendChild(p);
   return svg;
+}
+
+// ===========================================================================
+// READING LIST VIEW
+// ===========================================================================
+views.reading = function (root) {
+  const panel = el('div', { class: 'panel' });
+  panel.appendChild(el('div', { class: 'panel-header' }, [
+    el('h2', {}, `Reading List (${state.readingList.length})`),
+    el('div', { class: 'panel-actions' }, [
+      state.readingList.length > 0 ? el('button', {
+        class: 'btn btn-ghost',
+        onclick: async () => {
+          const ok = await modalConfirm('Clear reading list?', 'All saved items will be removed.');
+          if (!ok) return;
+          await send('CLEAR_READING_LIST');
+          await refreshAll(); render();
+        },
+      }, 'Clear all') : null,
+    ].filter(Boolean)),
+  ]));
+
+  const body = el('div', { class: 'panel-body' });
+  if (state.readingList.length === 0) {
+    body.appendChild(emptyState('Reading list is empty',
+      'Right-click any page and choose "Save to Reading List", or use the button in the tab row.'));
+  } else {
+    for (const item of state.readingList) {
+      const card = el('div', { class: 'reading-card' });
+      const fav  = el('img', { class: 'fav', src: item.favIconUrl || `https://www.google.com/s2/favicons?domain=${getDomain(item.url)}&sz=32`, alt: '' });
+      fav.onerror = () => { fav.src = defaultFaviconDataUri(); };
+
+      card.appendChild(el('div', { class: 'reading-main' }, [
+        fav,
+        el('div', { class: 'meta' }, [
+          el('div', { class: 'title' }, item.title || item.url),
+          el('div', { class: 'sub' }, getDomain(item.url)),
+          el('div', { class: 'reading-age' }, 'Saved ' + formatDate(item.savedAt)),
+        ]),
+      ]));
+
+      card.appendChild(el('div', { class: 'reading-actions' }, [
+        el('button', {
+          class: 'btn btn-primary',
+          onclick: async () => {
+            await chrome.tabs.create({ url: item.url });
+            // Auto-remove after opening
+            await send('REMOVE_FROM_READING_LIST', { id: item.id });
+            await refreshAll(); render();
+          },
+        }, 'Read now'),
+        el('button', {
+          class: 'btn btn-ghost',
+          onclick: async (e) => {
+            e.stopPropagation();
+            await send('REMOVE_FROM_READING_LIST', { id: item.id });
+            await refreshAll(); render();
+          },
+        }, 'Remove'),
+      ]));
+
+      body.appendChild(card);
+    }
+  }
+  panel.appendChild(body);
+  root.appendChild(panel);
+};
+
+// ===========================================================================
+// WORKSPACES VIEW
+// ===========================================================================
+const WS_COLORS = ['blue','green','purple','red','orange','pink','cyan','amber'];
+
+views.workspaces = function (root) {
+  const panel = el('div', { class: 'panel' });
+  panel.appendChild(el('div', { class: 'panel-header' }, [
+    el('h2', {}, 'Workspaces'),
+    el('div', { class: 'panel-actions' }, [
+      el('button', {
+        class: 'btn btn-primary',
+        onclick: async () => {
+          const name = await modalPrompt('Workspace name', 'My Workspace');
+          if (!name) return;
+          await send('CREATE_WORKSPACE', { name, color: WS_COLORS[state.workspaces.length % WS_COLORS.length] });
+          toast(`Workspace "${name}" created`, 'success');
+          await refreshAll(); render();
+        },
+      }, '+ New workspace'),
+    ]),
+  ]));
+
+  const body = el('div', { class: 'panel-body' });
+  if (state.workspaces.length === 0) {
+    body.appendChild(emptyState('No workspaces yet',
+      'Create a workspace to snapshot your current tabs and launch them as a set anytime.'));
+  } else {
+    for (const ws of state.workspaces) {
+      const card = el('div', { class: 'ws-card' });
+
+      const head = el('div', { class: 'ws-head' }, [
+        el('div', { class: `ws-dot group-${ws.color}` }),
+        el('div', { class: 'ws-info' }, [
+          el('div', { class: 'ws-name' }, ws.name),
+          el('div', { class: 'ws-meta' }, `${ws.tabs.length} tabs · Last used ${formatDate(ws.lastUsed)}`),
+        ]),
+      ]);
+      card.appendChild(head);
+
+      // Favicon row preview
+      if (ws.tabs.length > 0) {
+        const favs = el('div', { class: 'ws-favicons' });
+        ws.tabs.slice(0, 10).forEach((t) => {
+          const img = el('img', { src: t.favIconUrl || `https://www.google.com/s2/favicons?domain=${getDomain(t.url)}&sz=32`, alt: '', title: t.title });
+          img.onerror = () => { img.src = defaultFaviconDataUri(); };
+          favs.appendChild(img);
+        });
+        if (ws.tabs.length > 10) favs.appendChild(el('span', { class: 'ws-more' }, `+${ws.tabs.length - 10}`));
+        card.appendChild(favs);
+      }
+
+      card.appendChild(el('div', { class: 'ws-actions' }, [
+        el('button', {
+          class: 'btn btn-primary',
+          title: 'Open all workspace tabs in a new window',
+          onclick: async () => {
+            await send('LAUNCH_WORKSPACE', { id: ws.id });
+            toast(`Launched "${ws.name}"`, 'success');
+          },
+        }, 'Launch'),
+        el('button', {
+          class: 'btn',
+          title: 'Update workspace with current open tabs',
+          onclick: async () => {
+            await send('SAVE_TABS_TO_WORKSPACE', { id: ws.id });
+            toast('Workspace updated with current tabs', 'success');
+            await refreshAll(); render();
+          },
+        }, 'Update'),
+        el('button', {
+          class: 'btn btn-ghost btn-danger',
+          onclick: async () => {
+            const ok = await modalConfirm('Delete workspace?', `"${ws.name}" will be permanently removed.`);
+            if (!ok) return;
+            await send('DELETE_WORKSPACE', { id: ws.id });
+            toast('Workspace deleted', 'success');
+            await refreshAll(); render();
+          },
+        }, 'Delete'),
+      ]));
+
+      body.appendChild(card);
+    }
+  }
+  panel.appendChild(body);
+  root.appendChild(panel);
+};
+
+// ===========================================================================
+// INSIGHTS VIEW
+// ===========================================================================
+views.insights = async function (root) {
+  const panel = el('div', { class: 'panel' });
+  panel.appendChild(el('div', { class: 'panel-header' }, [
+    el('h2', {}, 'Tab Insights'),
+    el('div', { class: 'panel-actions' }, [
+      el('button', {
+        class: 'btn',
+        onclick: async () => { state.analytics = null; await refreshInsights(root, panel); },
+      }, 'Refresh'),
+    ]),
+  ]));
+
+  const body = el('div', { class: 'panel-body' }); body.id = 'insightsBody';
+  panel.appendChild(body);
+  root.appendChild(panel);
+
+  await refreshInsights(root, panel, body);
+};
+
+async function refreshInsights(root, panel, body) {
+  const b = body || document.getElementById('insightsBody');
+  if (!b) return;
+  b.innerHTML = '';
+
+  const data = await send('GET_TAB_ANALYTICS');
+  if (!data) { b.appendChild(emptyState('Could not load analytics', '')); return; }
+
+  const { total, zombies, ageBreakdown, topDomains } = data;
+
+  // ── Summary cards ───────────────────────────────────────────
+  const cards = el('div', { class: 'insights-cards' });
+  [
+    { val: total, lbl: 'Total tabs' },
+    { val: ageBreakdown.today, lbl: 'Active today', cls: 'fresh' },
+    { val: ageBreakdown.week,  lbl: 'This week',    cls: 'old'   },
+    { val: zombies.length,     lbl: 'Zombies',       cls: zombies.length > 0 ? 'stale' : '' },
+  ].forEach(({ val, lbl, cls }) => {
+    cards.appendChild(el('div', { class: `insights-card ${cls || ''}` }, [
+      el('div', { class: 'insights-val' }, String(val)),
+      el('div', { class: 'insights-lbl' }, lbl),
+    ]));
+  });
+  b.appendChild(cards);
+
+  // ── Age distribution bar ────────────────────────────────────
+  if (total > 0) {
+    b.appendChild(el('div', { class: 'insights-section-title' }, 'Age distribution'));
+    const barWrap = el('div', { class: 'age-bar-wrap' });
+    [
+      { val: ageBreakdown.today, cls: 'fresh', lbl: 'Today' },
+      { val: ageBreakdown.week,  cls: 'old',   lbl: 'This week' },
+      { val: ageBreakdown.older, cls: 'stale', lbl: 'Older' },
+      { val: ageBreakdown.unknown, cls: 'unk', lbl: 'Unknown' },
+    ].forEach(({ val, cls, lbl }) => {
+      if (!val) return;
+      const pct = Math.round((val / total) * 100);
+      barWrap.appendChild(el('div', {
+        class: `age-segment ${cls}`,
+        style: { width: pct + '%' },
+        title: `${lbl}: ${val} tab${val === 1 ? '' : 's'} (${pct}%)`,
+      }));
+    });
+    b.appendChild(barWrap);
+    const legend = el('div', { class: 'age-legend' });
+    [
+      { cls: 'fresh', lbl: `Today (${ageBreakdown.today})` },
+      { cls: 'old',   lbl: `This week (${ageBreakdown.week})` },
+      { cls: 'stale', lbl: `Older (${ageBreakdown.older})` },
+    ].forEach(({ cls, lbl }) => {
+      legend.appendChild(el('span', { class: 'age-legend-item' }, [
+        el('span', { class: `age-legend-dot ${cls}` }),
+        lbl,
+      ]));
+    });
+    b.appendChild(legend);
+  }
+
+  // ── Top domains ─────────────────────────────────────────────
+  if (topDomains.length > 0) {
+    b.appendChild(el('div', { class: 'insights-section-title' }, 'Most open domains'));
+    const domList = el('div', { class: 'domain-list' });
+    const maxCount = topDomains[0].count;
+    for (const { domain, count } of topDomains) {
+      const pct = Math.round((count / maxCount) * 100);
+      const row = el('div', { class: 'domain-row' }, [
+        el('span', { class: 'domain-name' }, domain),
+        el('div', { class: 'domain-bar-bg' }, [
+          el('div', { class: 'domain-bar-fill', style: { width: pct + '%' } }),
+        ]),
+        el('span', { class: 'domain-count' }, String(count)),
+        el('button', {
+          class: 'btn btn-icon btn-ghost close-domain-btn',
+          title: `Close all ${count} ${domain} tab${count === 1 ? '' : 's'}`,
+          onclick: async () => {
+            const n = await send('CLOSE_TABS_BY_DOMAIN', { domain });
+            toast(`Closed ${n} ${domain} tab${n === 1 ? '' : 's'}`, 'success');
+            await refreshAll(); render();
+          },
+        }, '✕'),
+      ]);
+      domList.appendChild(row);
+    }
+    b.appendChild(domList);
+  }
+
+  // ── Zombie tabs ─────────────────────────────────────────────
+  if (zombies.length > 0) {
+    b.appendChild(el('div', { class: 'insights-section-title' }, [
+      `Zombie tabs (${zombies.length})`,
+      el('button', {
+        class: 'btn btn-ghost',
+        style: { fontSize: '11px', marginLeft: '8px' },
+        title: 'Close all zombie tabs',
+        onclick: async () => {
+          const ok = await modalConfirm('Close all zombie tabs?', `${zombies.length} tab${zombies.length === 1 ? '' : 's'} untouched for 7+ days will be closed.`);
+          if (!ok) return;
+          for (const z of zombies) { try { await send('CLOSE_TAB', { tabId: z.id }); } catch {} }
+          toast(`Closed ${zombies.length} zombie tab${zombies.length === 1 ? '' : 's'}`, 'success');
+          await refreshAll(); render();
+        },
+      }, 'Close all'),
+    ]));
+    for (const z of zombies) {
+      const row = el('div', { class: 'row zombie-row' });
+      const fav = el('img', { class: 'fav', src: z.favIconUrl || defaultFaviconDataUri(), alt: '' });
+      fav.onerror = () => { fav.src = defaultFaviconDataUri(); };
+      row.appendChild(fav);
+      row.appendChild(el('div', { class: 'meta' }, [
+        el('div', { class: 'title' }, z.title || z.url),
+        el('div', { class: 'sub' }, `Last visited ${formatDate(z.lastActivity)}`),
+      ]));
+      row.appendChild(el('button', {
+        class: 'btn btn-icon btn-ghost', title: 'Close tab',
+        onclick: async (e) => {
+          e.stopPropagation();
+          await send('CLOSE_TAB', { tabId: z.id });
+          await refreshAll(); render();
+        },
+      }, '✕'));
+      row.addEventListener('click', async (e) => {
+        if (e.target.closest('button')) return;
+        await send('SWITCH_TAB', { tabId: z.id });
+      });
+      b.appendChild(row);
+    }
+  }
 }
 
 init();

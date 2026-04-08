@@ -450,3 +450,32 @@
    .popup-body .recent-age {
      font-size: 9px; color: var(--text-faint); flex-shrink: 0;
    }
+   
+   /* ── Tier 2 popup styles ─────────────────────────────────── */
+   
+   /* Reading List nav pill badge */
+   .nav-pill.active .pill-count { background: var(--accent); color: #fff; border-color: var(--accent); }
+   
+   /* Reading list mini cards in popup */
+   .popup-body .reading-card-mini {
+     display: flex;
+     align-items: center;
+     gap: 8px;
+     padding: 6px 8px;
+     border-radius: var(--radius-sm);
+     cursor: pointer;
+     transition: background var(--transition);
+     border-left: 2px solid transparent;
+   }
+   .popup-body .reading-card-mini:hover { background: var(--bg-elev-2); }
+   
+   /* History pill badge in search */
+   .popup-body .history-pill {
+     font-size: 9px;
+     padding: 2px 6px;
+     border-radius: 99px;
+     background: var(--bg-elev-3);
+     color: var(--text-faint);
+     flex-shrink: 0;
+     white-space: nowrap;
+   }

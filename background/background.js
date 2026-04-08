@@ -70,9 +70,10 @@ chrome.runtime.onInstalled.addListener(async (details) => {
       console.warn('[TabVault] contextMenus.removeAll error:', chrome.runtime.lastError.message);
     }
     const menus = [
-      { id: 'tabvault-bookmark',     title: 'Save to TabVault',        contexts: ['page', 'link'] },
-      { id: 'tabvault-session-save', title: 'Save current session',    contexts: ['page'] },
-      { id: 'tabvault-suspend-tab',  title: 'Suspend this tab',        contexts: ['page'] },
+      { id: 'tabvault-bookmark',      title: 'Save to TabVault',       contexts: ['page', 'link'] },
+      { id: 'tabvault-reading-list',  title: 'Save to Reading List',   contexts: ['page', 'link'] },
+      { id: 'tabvault-session-save',  title: 'Save current session',   contexts: ['page'] },
+      { id: 'tabvault-suspend-tab',   title: 'Suspend this tab',       contexts: ['page'] },
     ];
     for (const m of menus) {
       chrome.contextMenus.create(m, () => {
@@ -560,6 +561,16 @@ chrome.contextMenus.onClicked.addListener(async (info, tab) => {
     } catch (e) {
       notify('Error', 'Could not save bookmark');
     }
+  } else if (info.menuItemId === 'tabvault-reading-list') {
+    const url   = info.linkUrl || tab.url;
+    const title = info.linkUrl ? info.linkUrl : (tab.title || url);
+    const favIconUrl = tab.favIconUrl || '';
+    const list  = await storage.get('readingList', []);
+    if (!list.some((i) => i.url === url)) {
+      list.unshift({ id: 'rl_' + Date.now(), url, title, favIconUrl, savedAt: Date.now() });
+      await storage.set('readingList', list);
+      notify('Saved to Reading List', title);
+    }
   } else if (info.menuItemId === 'tabvault-session-save') {
     const s = await saveSession('Quick session ' + new Date().toLocaleString());
     notify('Session saved', s.name);
@@ -746,6 +757,145 @@ const handlers = {
       try { await chrome.tabs.update(t.id, { muted: false }); } catch {}
     }
     return tabs.length;
+  },
+
+  // ── Reading List ──────────────────────────────────────────
+  async GET_READING_LIST() {
+    return await storage.get('readingList', []);
+  },
+  async SAVE_TO_READING_LIST({ url, title, favIconUrl }) {
+    if (!url || !isSafeUrl(url)) return false;
+    const list = await storage.get('readingList', []);
+    if (list.some((i) => i.url === url)) return false; // already in list
+    list.unshift({ id: 'rl_' + Date.now(), url, title: title || url, favIconUrl: favIconUrl || '', savedAt: Date.now() });
+    await storage.set('readingList', list);
+    return true;
+  },
+  async REMOVE_FROM_READING_LIST({ id }) {
+    const list = await storage.get('readingList', []);
+    await storage.set('readingList', list.filter((i) => i.id !== id));
+    return true;
+  },
+  async CLEAR_READING_LIST() {
+    await storage.set('readingList', []);
+    return true;
+  },
+
+  // ── Workspaces ────────────────────────────────────────────
+  async GET_WORKSPACES() {
+    return await storage.get('workspaces', []);
+  },
+  async CREATE_WORKSPACE({ name, color }) {
+    const tabs = await chrome.tabs.query({ currentWindow: true });
+    const ws = {
+      id: 'ws_' + Date.now(),
+      name: name || 'New workspace',
+      color: color || 'blue',
+      createdAt: Date.now(),
+      lastUsed:  Date.now(),
+      tabs: tabs
+        .filter((t) => isSafeUrl(t.url))
+        .map((t) => ({ url: t.url, title: t.title, favIconUrl: t.favIconUrl || '', pinned: t.pinned })),
+    };
+    const list = await storage.get('workspaces', []);
+    list.unshift(ws);
+    await storage.set('workspaces', list);
+    return ws;
+  },
+  async UPDATE_WORKSPACE({ id, name, color }) {
+    const list = await storage.get('workspaces', []);
+    const ws = list.find((w) => w.id === id);
+    if (!ws) return false;
+    if (name)  ws.name  = name;
+    if (color) ws.color = color;
+    await storage.set('workspaces', list);
+    return ws;
+  },
+  async DELETE_WORKSPACE({ id }) {
+    const list = await storage.get('workspaces', []);
+    await storage.set('workspaces', list.filter((w) => w.id !== id));
+    return true;
+  },
+  async LAUNCH_WORKSPACE({ id }) {
+    const list = await storage.get('workspaces', []);
+    const ws = list.find((w) => w.id === id);
+    if (!ws || !ws.tabs.length) return false;
+    const w = await chrome.windows.create({ url: ws.tabs.map((t) => t.url) });
+    ws.lastUsed = Date.now();
+    await storage.set('workspaces', list);
+    return !!w;
+  },
+  async SAVE_TABS_TO_WORKSPACE({ id }) {
+    const list = await storage.get('workspaces', []);
+    const ws = list.find((w) => w.id === id);
+    if (!ws) return false;
+    const tabs = await chrome.tabs.query({ currentWindow: true });
+    ws.tabs = tabs
+      .filter((t) => isSafeUrl(t.url))
+      .map((t) => ({ url: t.url, title: t.title, favIconUrl: t.favIconUrl || '', pinned: t.pinned }));
+    ws.lastUsed = Date.now();
+    await storage.set('workspaces', list);
+    return true;
+  },
+
+  // ── Close by domain ───────────────────────────────────────
+  async CLOSE_TABS_BY_DOMAIN({ domain }) {
+    const tabs = await chrome.tabs.query({ currentWindow: true });
+    const targets = tabs.filter((t) => {
+      try { return new URL(t.url).hostname.replace(/^www\./, '') === domain && !t.pinned; }
+      catch { return false; }
+    });
+    for (const t of targets) { try { await chrome.tabs.remove(t.id); } catch {} }
+    return targets.length;
+  },
+  async GET_DOMAIN_SUMMARY() {
+    const tabs  = await chrome.tabs.query({ currentWindow: true });
+    const map   = new Map();
+    for (const t of tabs) {
+      try {
+        const domain = new URL(t.url).hostname.replace(/^www\./, '');
+        if (!map.has(domain)) map.set(domain, { domain, count: 0, tabs: [] });
+        map.get(domain).count++;
+        map.get(domain).tabs.push({ id: t.id, title: t.title, favIconUrl: t.favIconUrl, pinned: t.pinned });
+      } catch {}
+    }
+    return [...map.values()].sort((a, b) => b.count - a.count);
+  },
+
+  // ── Tab analytics ─────────────────────────────────────────
+  async GET_TAB_ANALYTICS() {
+    await ensureTabActivity();
+    const tabs = await chrome.tabs.query({ currentWindow: true });
+    const now  = Date.now();
+    const DAY  = 86400000;
+
+    const enriched = tabs.map((t) => ({
+      id: t.id, url: t.url, title: t.title, favIconUrl: t.favIconUrl,
+      active: t.active, pinned: t.pinned,
+      lastActivity: tabActivity.get(t.id) || null,
+      ageMs: tabActivity.get(t.id) ? now - tabActivity.get(t.id) : null,
+    }));
+
+    const zombies  = enriched.filter((t) => t.ageMs && t.ageMs > 7 * DAY && !t.active);
+    const today    = enriched.filter((t) => t.ageMs && t.ageMs <   DAY);
+    const week     = enriched.filter((t) => t.ageMs && t.ageMs >= DAY  && t.ageMs < 7 * DAY);
+    const older    = enriched.filter((t) => t.ageMs && t.ageMs >= 7 * DAY);
+    const unknown  = enriched.filter((t) => !t.ageMs);
+
+    const domainMap = new Map();
+    for (const t of tabs) {
+      try {
+        const d = new URL(t.url).hostname.replace(/^www\./, '');
+        domainMap.set(d, (domainMap.get(d) || 0) + 1);
+      } catch {}
+    }
+
+    return {
+      total:        tabs.length,
+      zombies:      zombies,
+      ageBreakdown: { today: today.length, week: week.length, older: older.length, unknown: unknown.length },
+      topDomains:   [...domainMap.entries()].sort((a, b) => b[1] - a[1]).slice(0, 8).map(([domain, count]) => ({ domain, count })),
+    };
   },
 
   async RESTORE_SAVED_SESSION({ session }) {

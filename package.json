@@ -1,0 +1,12 @@
+{
+  "name": "tabvault",
+  "version": "1.0.1",
+  "description": "A unified, professional Tab Manager and Bookmark Manager for Chrome.",
+  "private": true,
+  "scripts": {
+    "zip": "cd .. && zip -r tabvault-v$(node -p \"require('./tabvault/package.json').version\").zip tabvault --exclude '*.git*' --exclude '*node_modules*'",
+    "lint": "eslint **/*.js --ignore-pattern shared/lib/"
+  },
+  "keywords": ["chrome-extension", "tab-manager", "bookmark-manager"],
+  "license": "MIT"
+}

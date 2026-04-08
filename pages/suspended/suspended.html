@@ -1,0 +1,103 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>Suspended — TabVault</title>
+  <link rel="stylesheet" href="../../shared/shared.css" />
+  <style>
+    body {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      min-height: 100vh;
+      padding: 24px;
+    }
+    .card {
+      max-width: 420px;
+      text-align: center;
+      background: var(--bg-elev);
+      border: 1px solid var(--border);
+      border-radius: var(--radius-lg);
+      padding: 40px 32px;
+      box-shadow: var(--shadow);
+    }
+    .moon {
+      font-size: 56px;
+      margin-bottom: 12px;
+      filter: grayscale(1);
+      opacity: 0.7;
+    }
+    h1 {
+      font-size: 18px;
+      margin-bottom: 6px;
+    }
+    .desc {
+      font-size: 12px;
+      color: var(--text-dim);
+      margin-bottom: 24px;
+    }
+    .url-row {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 10px 12px;
+      background: var(--bg-elev-2);
+      border: 1px solid var(--border);
+      border-radius: var(--radius-sm);
+      margin-bottom: 24px;
+      text-align: left;
+    }
+    .url-row img {
+      width: 20px;
+      height: 20px;
+      border-radius: 4px;
+    }
+    .url-info { flex: 1; min-width: 0; }
+    .url-title {
+      font-size: 13px;
+      font-weight: 500;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    .url-domain {
+      font-size: 11px;
+      color: var(--text-faint);
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    .restore-btn {
+      width: 100%;
+      justify-content: center;
+      padding: 12px;
+      font-size: 13px;
+    }
+    .hint {
+      font-size: 11px;
+      color: var(--text-faint);
+      margin-top: 16px;
+    }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <div class="moon">💤</div>
+    <h1>Tab suspended</h1>
+    <p class="desc">This tab was put to sleep to save memory.</p>
+
+    <div class="url-row">
+      <img id="favicon" alt="" />
+      <div class="url-info">
+        <div class="url-title" id="title">Loading…</div>
+        <div class="url-domain" id="domain"></div>
+      </div>
+    </div>
+
+    <button class="btn btn-primary restore-btn" id="restoreBtn">Click to restore</button>
+    <div class="hint">Suspended by TabVault</div>
+  </div>
+
+  <script src="suspended.js"></script>
+</body>
+</html>

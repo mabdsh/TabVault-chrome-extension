@@ -1,7 +1,7 @@
 // popup.js — TabVault popup with sub-tabs (Tabs / Sessions / Bookmarks)
 import {
   send, $, $$, el, debounce, getDomain, favicon, defaultFaviconDataUri,
-  formatDate, toast, modalPrompt, modalConfirm,
+  formatDate, formatAge, ageClass, toast, modalPrompt, modalConfirm,
 } from '../shared/common.js';
 
 const state = {
@@ -13,8 +13,10 @@ const state = {
   bookmarkTree: [],
   flatBookmarks: [],
   duplicates: [],
-  bookmarkPath: [],   // navigation breadcrumb in bookmark tree
-  currentWindowId: null, // pre-fetched so sidePanel.open() can be called synchronously
+  bookmarkPath: [],
+  recentTabs: [],
+  lockedUrls: new Set(),
+  currentWindowId: null,
 };
 
 // ---------- Init ----------
@@ -26,22 +28,24 @@ async function init() {
 
 async function loadAll() {
   try {
-    const [tabsData, sessions, tree, dups, currentTab] = await Promise.all([
+    const [tabsData, sessions, tree, dups, recent, locked, currentTab] = await Promise.all([
       send('GET_ALL_TABS'),
       send('GET_ALL_SESSIONS'),
       send('GET_BOOKMARK_TREE'),
       send('FIND_DUPLICATES'),
-      // Pre-fetch the window ID so sidePanel.open() can be called
-      // synchronously later (Chrome requires a direct user gesture — no awaits)
+      send('GET_RECENT_TABS'),
+      send('GET_LOCKED_URLS'),
       chrome.tabs.query({ active: true, currentWindow: true }),
     ]);
-    state.tabs = tabsData?.tabs || [];
-    state.groups = tabsData?.groups || [];
-    state.sessions = sessions || [];
-    state.bookmarkTree = tree || [];
+    state.tabs          = tabsData?.tabs    || [];
+    state.groups        = tabsData?.groups  || [];
+    state.sessions      = sessions  || [];
+    state.bookmarkTree  = tree       || [];
     state.flatBookmarks = [];
     flatten(state.bookmarkTree, state.flatBookmarks);
-    state.duplicates = dups || [];
+    state.duplicates    = dups    || [];
+    state.recentTabs    = recent  || [];
+    state.lockedUrls    = new Set(locked || []);
     state.currentWindowId = currentTab?.[0]?.windowId ?? null;
     updateCounts();
   } catch (e) {
@@ -166,27 +170,50 @@ function renderTabs(body) {
     }
     for (const t of ungrouped) body.appendChild(tabRow(t));
   }
+
+  // Recently closed section
+  if (state.recentTabs.length > 0) {
+    body.appendChild(renderRecentlyClosed());
+  }
 }
 
 function tabRow(tab) {
   const isSuspended = tab.url?.includes('suspended.html');
+  const isLocked  = tab._locked || state.lockedUrls.has(tab.url);
+  const isPlaying = tab.audible && !tab.mutedInfo?.muted;
+  const isMuted   = !!tab.mutedInfo?.muted;
+  const age       = formatAge(tab._lastActivity);
+  const ageCls    = ageClass(tab._lastActivity);
+
   const row = el('div', {
-    class: 'row' + (tab.active ? ' active' : '') + (isSuspended ? ' suspended' : '') + (tab.pinned ? ' pinned' : ''),
+    class: [
+      'row',
+      tab.active  ? 'active'    : '',
+      isSuspended ? 'suspended' : '',
+      tab.pinned  ? 'pinned'    : '',
+      isLocked    ? 'is-locked' : '',
+      isPlaying   ? 'is-playing': '',
+    ].filter(Boolean).join(' '),
     'data-tab-id': tab.id,
   });
 
-  const fav = el('img', {
-    class: 'fav',
-    src: tab.favIconUrl || favicon(tab.url),
-    alt: '',
-  });
+  // Favicon + audio dot
+  const favWrap = el('div', { class: 'fav-wrap' });
+  const fav = el('img', { class: 'fav', src: tab.favIconUrl || favicon(tab.url), alt: '' });
   fav.addEventListener('error', () => { fav.src = defaultFaviconDataUri(); });
-  row.appendChild(fav);
+  favWrap.appendChild(fav);
+  if (isPlaying || isMuted) {
+    favWrap.appendChild(el('span', { class: 'audio-dot' + (isMuted ? ' muted' : '') }));
+  }
+  row.appendChild(favWrap);
 
   row.appendChild(el('div', { class: 'meta' }, [
     el('div', { class: 'title' }, tab.title || '(untitled)'),
     el('div', { class: 'sub' }, getDomain(tab.url)),
   ]));
+
+  if (age) row.appendChild(el('span', { class: `age-badge ${ageCls}` }, age));
+  if (isLocked) row.appendChild(el('span', { class: 'lock-indicator', title: 'Tab is locked' }, '🔒'));
 
   const actions = el('div', { class: 'actions' });
   const pinBtn = el('button', {
@@ -194,30 +221,46 @@ function tabRow(tab) {
     onclick: async (e) => {
       e.stopPropagation();
       await send('PIN_TAB', { tabId: tab.id, pinned: !tab.pinned });
-      await loadAll();
-      render();
+      await loadAll(); render();
     },
   }, tab.pinned ? '📍' : '📌');
+
   const suspendBtn = el('button', {
     title: 'Suspend',
     onclick: async (e) => {
       e.stopPropagation();
       await send('SUSPEND_TAB', { tabId: tab.id });
-      await loadAll();
-      render();
+      await loadAll(); render();
     },
   }, '💤');
-  const closeBtn = el('button', {
-    class: 'danger',
-    title: 'Close',
-    onclick: async (e) => {
-      e.stopPropagation();
-      await send('CLOSE_TAB', { tabId: tab.id });
-      await loadAll();
-      render();
-    },
-  }, '✕');
-  actions.append(pinBtn, suspendBtn, closeBtn);
+
+  actions.append(pinBtn, suspendBtn);
+
+  if (isPlaying || isMuted) {
+    const muteBtn = el('button', {
+      title: isMuted ? 'Unmute' : 'Mute',
+      onclick: async (e) => {
+        e.stopPropagation();
+        await send('TOGGLE_MUTE_TAB', { tabId: tab.id, muted: !isMuted });
+        await loadAll(); render();
+      },
+    }, isMuted ? '🔈' : '🔊');
+    actions.appendChild(muteBtn);
+  }
+
+  if (!isLocked) {
+    const closeBtn = el('button', {
+      class: 'danger',
+      title: 'Close',
+      onclick: async (e) => {
+        e.stopPropagation();
+        await send('CLOSE_TAB', { tabId: tab.id });
+        await loadAll(); render();
+      },
+    }, '✕');
+    actions.appendChild(closeBtn);
+  }
+
   row.appendChild(actions);
 
   row.addEventListener('click', async () => {
@@ -226,6 +269,33 @@ function tabRow(tab) {
   });
 
   return row;
+}
+
+function renderRecentlyClosed() {
+  const wrap = el('div', { class: 'recent-section' });
+  wrap.appendChild(el('div', { class: 'section-title' }, [
+    'Recently closed',
+    el('span', { style: { background: 'var(--bg-elev-3)', borderRadius: '99px', padding: '1px 7px', fontSize: '10px' } },
+      String(state.recentTabs.length)),
+  ]));
+  for (const t of state.recentTabs.slice(0, 8)) {
+    const age = formatAge(t.closedAt);
+    const row = el('div', { class: 'row recent-row' });
+    const fav = el('img', { class: 'fav', src: t.favIconUrl || favicon(t.url), alt: '' });
+    fav.onerror = () => { fav.src = defaultFaviconDataUri(); };
+    row.appendChild(fav);
+    row.appendChild(el('div', { class: 'meta' }, [
+      el('div', { class: 'title' }, t.title || t.url),
+      el('div', { class: 'sub' }, getDomain(t.url)),
+    ]));
+    if (age) row.appendChild(el('span', { class: 'recent-age' }, age));
+    row.addEventListener('click', async () => {
+      await send('RESTORE_RECENT_TAB', { sessionId: t.sessionId, url: t.url });
+      await loadAll(); render();
+    });
+    wrap.appendChild(row);
+  }
+  return wrap;
 }
 
 // ---------- SESSIONS view ----------

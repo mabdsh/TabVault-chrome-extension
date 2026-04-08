@@ -13,7 +13,8 @@
     "contextMenus",
     "sidePanel",
     "scripting",
-    "notifications"
+    "notifications",
+    "sessions"
   ],
   "host_permissions": [
     "<all_urls>"

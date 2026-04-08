@@ -1,15 +1,19 @@
 // sidebar.js — TabVault sidebar main module
 import {
   send, $, $$, el, debounce, getDomain, favicon, defaultFaviconDataUri,
-  formatDate, escapeHtml, tagColor, toast, showUndoToast, modalPrompt, modalConfirm,
+  formatDate, formatAge, ageClass, escapeHtml, tagColor,
+  toast, showUndoToast, modalPrompt, modalConfirm,
 } from '../shared/common.js';
 
 const state = {
   view: 'tabs',
   tabs: [],
   groups: [],
-  windows: [],           // all open normal windows (populated in 'all' mode)
-  windowFilter: null,    // null = current window, 'all' = all windows, number = specific windowId
+  windows: [],
+  windowFilter: null,
+  recentTabs: [],            // recently closed tabs from chrome.sessions
+  lockedUrls: new Set(),     // URLs that are locked (reopen on close)
+  showRecentlyClosed: false, // toggle for recently-closed section
   sessions: [],
   bookmarkTree: [],
   bookmarkMeta: {},
@@ -155,21 +159,25 @@ function setupScanProgressListener() {
 
 async function refreshAll() {
   try {
-    const [tabsData, sessions, tree, meta, dups] = await Promise.all([
+    const [tabsData, sessions, tree, meta, dups, recent, locked] = await Promise.all([
       send('GET_ALL_TABS', { windowId: state.windowFilter }),
       send('GET_ALL_SESSIONS'),
       send('GET_BOOKMARK_TREE'),
       send('GET_ALL_BOOKMARK_META'),
       send('FIND_DUPLICATES'),
+      send('GET_RECENT_TABS'),
+      send('GET_LOCKED_URLS'),
     ]);
-    state.tabs = tabsData.tabs || [];
-    state.groups = tabsData.groups || [];
-    state.windows = tabsData.windows || [];
-    state.sessions = sessions || [];
-    state.bookmarkTree = tree || [];
-    state.bookmarkMeta = meta || {};
-    state.duplicates = dups || [];
-    state.flatBookmarks = [];
+    state.tabs        = tabsData.tabs    || [];
+    state.groups      = tabsData.groups  || [];
+    state.windows     = tabsData.windows || [];
+    state.sessions    = sessions  || [];
+    state.bookmarkTree   = tree   || [];
+    state.bookmarkMeta   = meta   || {};
+    state.duplicates     = dups   || [];
+    state.recentTabs     = recent || [];
+    state.lockedUrls     = new Set(locked || []);
+    state.flatBookmarks  = [];
     flatten(state.bookmarkTree, state.flatBookmarks);
 
     $('#navTabCount').textContent = state.tabs.length;
@@ -226,7 +234,11 @@ function setupTabListeners() {
 views.tabs = function (root) {
   const panel = el('div', { class: 'panel' + (state.selectionMode ? ' selection-mode' : '') });
 
-  // Window picker — lets users see tabs from all windows or a specific one
+  const audioTabs   = state.tabs.filter((t) => t.audible && !t.mutedInfo?.muted);
+  const mutedTabs   = state.tabs.filter((t) => t.mutedInfo?.muted);
+  const hasAudio    = audioTabs.length > 0;
+  const hasMuted    = mutedTabs.length > 0;
+
   const windowPickerItems = [
     el('option', { value: '' }, 'Current window'),
     el('option', { value: 'all' }, `All windows${state.windows.length > 1 ? ` (${state.windows.length})` : ''}`),
@@ -282,6 +294,24 @@ views.tabs = function (root) {
           render();
         },
       }, 'Auto-group') : null,
+      // Mute All — only shown when audio is playing
+      (hasAudio && !state.selectionMode) ? el('button', {
+        class: 'btn btn-audio-mute',
+        title: `Mute all ${audioTabs.length} playing tab${audioTabs.length === 1 ? '' : 's'}`,
+        onclick: async () => {
+          await send('MUTE_ALL_AUDIO');
+          await refreshAll(); render();
+        },
+      }, [
+        el('span', { class: 'audio-pulse' }),
+        `Mute all (${audioTabs.length})`,
+      ]) : null,
+      // Unmute All — only shown when tabs are muted
+      (hasMuted && !hasAudio && !state.selectionMode) ? el('button', {
+        class: 'btn btn-ghost',
+        title: 'Unmute all tabs',
+        onclick: async () => { await send('UNMUTE_ALL'); await refreshAll(); render(); },
+      }, 'Unmute all') : null,
     ].filter(Boolean)),
   ]);
   panel.appendChild(header);
@@ -294,6 +324,12 @@ views.tabs = function (root) {
   } else {
     renderTabList(body);
   }
+
+  // Recently closed section
+  if (state.recentTabs.length > 0) {
+    body.appendChild(renderRecentlyClosed());
+  }
+
   panel.appendChild(body);
 
   // stats bar
@@ -311,6 +347,102 @@ views.tabs = function (root) {
 };
 
 function renderTabList(container) {
+  const pinned    = state.tabs.filter((t) => t.pinned);
+  const ungrouped = state.tabs.filter((t) => !t.pinned && (t.groupId === -1 || t.groupId == null));
+  const grouped   = new Map();
+  for (const t of state.tabs) {
+    if (t.pinned) continue;
+    if (t.groupId !== -1 && t.groupId != null) {
+      if (!grouped.has(t.groupId)) grouped.set(t.groupId, []);
+      grouped.get(t.groupId).push(t);
+    }
+  }
+
+  if (pinned.length) {
+    container.appendChild(el('div', { class: 'group-header' }, 'Pinned'));
+    for (const t of pinned) container.appendChild(tabRow(t));
+  }
+
+  for (const group of state.groups) {
+    const tabs = grouped.get(group.id);
+    if (!tabs) continue;
+    container.appendChild(el('div', { class: 'group-header' }, [
+      el('span', { class: `group-dot group-${group.color}` }),
+      el('span', {}, group.title || '(unnamed group)'),
+      el('span', { class: 'folder-count' }, `${tabs.length}`),
+    ]));
+    for (const t of tabs) container.appendChild(tabRow(t));
+  }
+
+  for (const t of ungrouped) container.appendChild(tabRow(t));
+}
+
+function renderRecentlyClosed() {
+  const shown = state.showRecentlyClosed;
+  const wrap  = el('div', { class: 'recent-section' });
+
+  const toggle = el('div', {
+    class: 'recent-header',
+    onclick: () => { state.showRecentlyClosed = !state.showRecentlyClosed; render(); },
+  }, [
+    el('span', { class: 'recent-chevron' + (shown ? ' open' : '') }, '›'),
+    el('span', { class: 'recent-label' }, 'Recently closed'),
+    el('span', { class: 'recent-count' }, String(state.recentTabs.length)),
+  ]);
+  wrap.appendChild(toggle);
+
+  if (shown) {
+    const list = el('div', { class: 'recent-list' });
+    for (const t of state.recentTabs.slice(0, 12)) {
+      const age = formatAge(t.closedAt);
+      const row = el('div', { class: 'recent-row' });
+
+      const fav = el('img', { class: 'fav', src: t.favIconUrl || favicon(t.url), alt: '' });
+      fav.onerror = () => { fav.src = defaultFaviconDataUri(); };
+
+      row.appendChild(fav);
+      row.appendChild(el('div', { class: 'meta' }, [
+        el('div', { class: 'title' }, t.title || t.url),
+        el('div', { class: 'sub' }, getDomain(t.url)),
+      ]));
+      if (age) row.appendChild(el('span', { class: 'recent-age' }, age));
+
+      row.appendChild(el('button', {
+        class: 'btn btn-icon btn-ghost recent-restore',
+        title: 'Restore tab',
+        onclick: async (e) => {
+          e.stopPropagation();
+          await send('RESTORE_RECENT_TAB', { sessionId: t.sessionId, url: t.url });
+          await refreshAll(); render();
+        },
+      }, [
+        (() => {
+          const ns = 'http://www.w3.org/2000/svg';
+          const svg = document.createElementNS(ns, 'svg');
+          svg.setAttribute('viewBox', '0 0 24 24');
+          svg.setAttribute('class', 'icon');
+          const p = document.createElementNS(ns, 'path');
+          p.setAttribute('d', 'M21 12a9 9 0 11-3-6.7');
+          const p2 = document.createElementNS(ns, 'path');
+          p2.setAttribute('d', 'M21 4v5h-5');
+          svg.append(p, p2);
+          return svg;
+        })(),
+      ]));
+
+      row.addEventListener('click', async () => {
+        await send('RESTORE_RECENT_TAB', { sessionId: t.sessionId, url: t.url });
+        await refreshAll(); render();
+      });
+
+      list.appendChild(row);
+    }
+    wrap.appendChild(list);
+  }
+  return wrap;
+}
+
+
   // Group tabs by groupId; pinned first
   const pinned = state.tabs.filter((t) => t.pinned);
   const ungrouped = state.tabs.filter((t) => !t.pinned && (t.groupId === -1 || t.groupId == null));
@@ -342,16 +474,27 @@ function renderTabList(container) {
   }
 
   for (const t of ungrouped) container.appendChild(tabRow(t));
-}
 
 function tabRow(tab) {
   const isSuspended = tab.url?.includes('suspended.html');
-  const isSelected = state.selectedTabIds.has(tab.id);
+  const isSelected  = state.selectedTabIds.has(tab.id);
+  const isLocked    = tab._locked || state.lockedUrls.has(tab.url);
+  const isPlaying   = tab.audible && !tab.mutedInfo?.muted;
+  const isMuted     = !!tab.mutedInfo?.muted;
+  const age         = formatAge(tab._lastActivity);
+  const ageCls      = ageClass(tab._lastActivity);
+
   const row = el('div', {
-    class: 'row' + (tab.active ? ' active' : '') +
-           (isSuspended ? ' suspended' : '') +
-           (tab.pinned ? ' pinned' : '') +
-           (isSelected ? ' selected' : ''),
+    class: [
+      'row',
+      tab.active    ? 'active'    : '',
+      isSuspended   ? 'suspended' : '',
+      tab.pinned    ? 'pinned'    : '',
+      isSelected    ? 'selected'  : '',
+      isLocked      ? 'is-locked' : '',
+      isPlaying     ? 'is-playing': '',
+      isMuted       ? 'is-muted'  : '',
+    ].filter(Boolean).join(' '),
     role: 'listitem',
     'data-tab-id': tab.id,
     draggable: 'true',
@@ -379,22 +522,74 @@ function tabRow(tab) {
     alt: '',
   });
   fav.addEventListener('error', () => { fav.src = defaultFaviconDataUri(); });
-  row.appendChild(fav);
 
-  row.appendChild(el('div', { class: 'meta' }, [
+  // Audio playing pulse indicator on the favicon
+  const favWrap = el('div', { class: 'fav-wrap' });
+  favWrap.appendChild(fav);
+  if (isPlaying || isMuted) {
+    favWrap.appendChild(el('span', { class: 'audio-dot' + (isMuted ? ' muted' : '') }));
+  }
+  row.appendChild(favWrap);
+
+  const metaDiv = el('div', { class: 'meta' }, [
     el('div', { class: 'title' }, tab.title || '(untitled)'),
     el('div', { class: 'sub' }, getDomain(tab.url)),
-  ]));
+  ]);
+  row.appendChild(metaDiv);
+
+  // Age badge
+  if (age) {
+    row.appendChild(el('span', { class: `age-badge ${ageCls}` }, age));
+  }
 
   const actions = el('div', { class: 'actions' }, [
+    // Lock / Unlock button — always visible when locked
+    el('button', {
+      class: 'btn btn-icon btn-ghost lock-btn' + (isLocked ? ' locked' : ''),
+      title: isLocked ? 'Unlock tab (click to allow closing)' : 'Lock tab (prevent accidental close)',
+      onclick: async (e) => {
+        e.stopPropagation();
+        if (isLocked) {
+          await send('UNLOCK_TAB', { tabId: tab.id, url: tab.url });
+        } else {
+          await send('LOCK_TAB', { tabId: tab.id });
+        }
+        await refreshAll(); render();
+      },
+    }, (() => {
+      const ns = 'http://www.w3.org/2000/svg';
+      const svg = document.createElementNS(ns, 'svg');
+      svg.setAttribute('class', 'icon'); svg.setAttribute('viewBox', '0 0 24 24');
+      svg.innerHTML = isLocked
+        ? '<rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0110 0v4"/>'
+        : '<rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 019.9-1"/>';
+      return svg;
+    })()),
+    // Mute / Unmute — only shown for audio tabs
+    (isPlaying || isMuted) ? el('button', {
+      class: 'btn btn-icon btn-ghost',
+      title: isMuted ? 'Unmute tab' : 'Mute tab',
+      onclick: async (e) => {
+        e.stopPropagation();
+        await send('TOGGLE_MUTE_TAB', { tabId: tab.id, muted: !isMuted });
+        await refreshAll(); render();
+      },
+    }, (() => {
+      const ns = 'http://www.w3.org/2000/svg';
+      const svg = document.createElementNS(ns, 'svg');
+      svg.setAttribute('class', 'icon'); svg.setAttribute('viewBox', '0 0 24 24');
+      svg.innerHTML = isMuted
+        ? '<polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/><line x1="23" y1="9" x2="17" y2="15"/><line x1="17" y1="9" x2="23" y2="15"/>'
+        : '<polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/><path d="M19.07 4.93a10 10 0 010 14.14M15.54 8.46a5 5 0 010 7.07"/>';
+      return svg;
+    })()) : null,
     el('button', {
       class: 'btn btn-icon btn-ghost',
       title: tab.pinned ? 'Unpin' : 'Pin',
       onclick: async (e) => {
         e.stopPropagation();
         await send('PIN_TAB', { tabId: tab.id, pinned: !tab.pinned });
-        await refreshAll();
-        render();
+        await refreshAll(); render();
       },
     }, tab.pinned ? '📍' : '📌'),
     el('button', {
@@ -403,24 +598,23 @@ function tabRow(tab) {
       onclick: async (e) => {
         e.stopPropagation();
         await send('SUSPEND_TAB', { tabId: tab.id });
-        await refreshAll();
-        render();
+        await refreshAll(); render();
       },
     }, '💤'),
-    el('button', {
+    // Close — hidden for locked tabs
+    !isLocked ? el('button', {
       class: 'btn btn-icon btn-ghost',
       title: 'Close',
       onclick: async (e) => {
         e.stopPropagation();
-        // Snapshot URL/title before closing so undo can restore it
         const { url, title, pinned } = tab;
         await send('CLOSE_TAB', { tabId: tab.id });
         showUndoToast(`Closed "${tab.title || 'tab'}"`, async () => {
           await send('OPEN_URL', { url, pinned });
         });
       },
-    }, '✕'),
-  ]);
+    }, '✕') : null,
+  ].filter(Boolean));
   row.appendChild(actions);
 
   row.addEventListener('click', async (e) => {

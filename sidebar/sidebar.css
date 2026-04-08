@@ -385,3 +385,133 @@
      padding: 0 6px; border-radius: 99px;
      margin-left: 5px; font-size: 10px;
    }
+   
+   /* ── Tier 1 feature styles ─────────────────────────────── */
+   
+   /* Favicon wrapper for audio dot */
+   .fav-wrap {
+     position: relative;
+     width: 16px; height: 16px;
+     flex-shrink: 0;
+   }
+   .fav-wrap .fav { width: 100%; height: 100%; }
+   
+   /* Audio dot — small coloured circle on bottom-right of favicon */
+   .audio-dot {
+     position: absolute;
+     bottom: -2px; right: -2px;
+     width: 7px; height: 7px;
+     border-radius: 50%;
+     background: var(--accent);
+     border: 1.5px solid var(--bg);
+     animation: audio-pulse 1.8s ease-in-out infinite;
+   }
+   .audio-dot.muted {
+     background: var(--text-faint);
+     animation: none;
+   }
+   @keyframes audio-pulse {
+     0%,100% { transform: scale(1); opacity: 1; }
+     50%      { transform: scale(1.3); opacity: .7; }
+   }
+   
+   /* Mute All button in panel header */
+   .btn-audio-mute {
+     display: flex; align-items: center; gap: 5px;
+     background: rgba(100,114,244,.12);
+     border-color: rgba(100,114,244,.25);
+     color: var(--accent);
+     font-size: 11px;
+   }
+   .btn-audio-mute:hover { background: var(--accent); color: #fff; }
+   .audio-pulse {
+     width: 8px; height: 8px;
+     border-radius: 50%;
+     background: var(--accent);
+     animation: audio-pulse 1.8s ease-in-out infinite;
+     flex-shrink: 0;
+   }
+   .btn-audio-mute:hover .audio-pulse { background: #fff; }
+   
+   /* Age badge */
+   .age-badge {
+     font-size: 9px;
+     font-weight: 600;
+     padding: 1px 5px;
+     border-radius: 99px;
+     flex-shrink: 0;
+     white-space: nowrap;
+   }
+   .age-fresh   { background: rgba(45,212,160,.15);  color: var(--success); }
+   .age-old     { background: rgba(245,165,36,.15);  color: var(--warning); }
+   .age-stale   { background: rgba(242,100,100,.15); color: var(--danger);  }
+   .age-unknown { display: none; }
+   
+   /* Lock button */
+   .lock-btn { color: var(--text-faint); }
+   .lock-btn.locked {
+     opacity: 1 !important;
+     color: var(--warning);
+   }
+   .row.is-locked .lock-btn { opacity: 1 !important; }
+   /* Hide close button already handled in JS (.filter(Boolean)) */
+   
+   /* Recently closed section */
+   .recent-section {
+     margin-top: 8px;
+     border-top: 1px solid var(--border);
+   }
+   .recent-header {
+     display: flex;
+     align-items: center;
+     gap: 7px;
+     padding: 7px 10px;
+     cursor: pointer;
+     user-select: none;
+     font-size: 10px;
+     font-weight: 600;
+     text-transform: uppercase;
+     letter-spacing: 0.5px;
+     color: var(--text-faint);
+     border-radius: var(--radius-sm);
+     transition: background var(--transition);
+   }
+   .recent-header:hover { background: var(--bg-elev-2); }
+   .recent-chevron {
+     font-size: 12px;
+     color: var(--text-faint);
+     transition: transform var(--transition);
+     display: inline-block;
+   }
+   .recent-chevron.open { transform: rotate(90deg); }
+   .recent-label { flex: 1; }
+   .recent-count {
+     background: var(--bg-elev-3);
+     color: var(--text-faint);
+     border-radius: 99px;
+     padding: 1px 6px;
+     font-size: 10px;
+   }
+   .recent-list { padding: 2px 0 6px; }
+   .recent-row {
+     display: flex;
+     align-items: center;
+     gap: 8px;
+     padding: 6px 10px;
+     border-radius: var(--radius-sm);
+     cursor: pointer;
+     transition: background var(--transition);
+     opacity: .8;
+   }
+   .recent-row:hover { background: var(--bg-elev-2); opacity: 1; }
+   .recent-row .fav  { width: 14px; height: 14px; border-radius: 3px; flex-shrink: 0; }
+   .recent-row .meta { flex: 1; min-width: 0; }
+   .recent-row .title { font-size: 11px; font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+   .recent-row .sub   { font-size: 10px; color: var(--text-faint); }
+   .recent-age {
+     font-size: 9px;
+     color: var(--text-faint);
+     flex-shrink: 0;
+   }
+   .recent-restore { opacity: 0; transition: opacity var(--transition); }
+   .recent-row:hover .recent-restore { opacity: 1; }

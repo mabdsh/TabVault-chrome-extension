@@ -67,6 +67,25 @@ export function formatDate(ts) {
   return d.toLocaleDateString();
 }
 
+// Returns a compact age string: "5m", "3h", "2d", "1w"
+export function formatAge(ts) {
+  if (!ts) return null;
+  const diff = (Date.now() - ts) / 1000;
+  if (diff < 3600)   return Math.floor(diff / 60) + 'm';
+  if (diff < 86400)  return Math.floor(diff / 3600) + 'h';
+  if (diff < 604800) return Math.floor(diff / 86400) + 'd';
+  return Math.floor(diff / 604800) + 'w';
+}
+
+// CSS class for coloring the age badge: fresh → old → stale
+export function ageClass(ts) {
+  if (!ts) return 'age-unknown';
+  const days = (Date.now() - ts) / 86400000;
+  if (days < 1) return 'age-fresh';
+  if (days < 7) return 'age-old';
+  return 'age-stale';
+}
+
 export function escapeHtml(s) {
   return String(s ?? '').replace(/[&<>"']/g, (c) => ({
     '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',

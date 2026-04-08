@@ -100,7 +100,8 @@ chrome.runtime.onStartup.addListener(async () => {
 });
 
 // ---------- Tab activity tracking (for suspender) ----------
-const tabActivity = new Map(); // tabId -> last active timestamp
+const tabActivity    = new Map(); // tabId -> last active timestamp
+const lockedTabIdMap = new Map(); // tabId -> { url, title, pinned }  (lock-and-reopen)
 let _tabActivityLoaded = false;
 let _activitySaveTimer = null;
 
@@ -129,14 +130,51 @@ async function bumpTabActivity(tabId) {
 // Pre-load on SW start so the map is ready before the first alarm fires
 ensureTabActivity();
 
+// Rebuild locked-tab tracking after SW restart (tabIds don't survive restarts)
+async function rebuildLockedTabIdMap() {
+  const lockedUrls = await storage.get('lockedUrls', []);
+  if (!lockedUrls.length) return;
+  const lockedSet = new Set(lockedUrls);
+  const tabs = await chrome.tabs.query({});
+  for (const t of tabs) {
+    if (t.url && lockedSet.has(t.url)) {
+      lockedTabIdMap.set(t.id, { url: t.url, title: t.title, pinned: t.pinned });
+    }
+  }
+}
+rebuildLockedTabIdMap();
+
 chrome.tabs.onActivated.addListener(({ tabId }) => bumpTabActivity(tabId));
-chrome.tabs.onUpdated.addListener((tabId, info) => {
-  if (info.status === 'complete') bumpTabActivity(tabId);
+
+chrome.tabs.onUpdated.addListener(async (tabId, info, tab) => {
+  if (info.status === 'complete') {
+    bumpTabActivity(tabId);
+    // Keep locked-tab map in sync as tabs navigate
+    if (tab.url) {
+      const lockedUrls = await storage.get('lockedUrls', []);
+      if (lockedUrls.includes(tab.url)) {
+        lockedTabIdMap.set(tabId, { url: tab.url, title: tab.title, pinned: tab.pinned });
+      }
+    }
+  }
 });
-chrome.tabs.onRemoved.addListener(async (tabId) => {
+
+chrome.tabs.onRemoved.addListener(async (tabId, removeInfo) => {
   await ensureTabActivity();
   tabActivity.delete(tabId);
   scheduleActivitySave();
+
+  // Reopen if this was a locked tab (skip on window close — user is intentionally closing)
+  if (!removeInfo.isWindowClosing) {
+    const info = lockedTabIdMap.get(tabId);
+    if (info) {
+      lockedTabIdMap.delete(tabId);
+      // Small delay to avoid Chrome treating it as a pop-up
+      setTimeout(() => chrome.tabs.create({ url: info.url, pinned: info.pinned || false }), 120);
+    }
+  } else {
+    lockedTabIdMap.delete(tabId);
+  }
 });
 
 // ---------- Badge ----------
@@ -605,9 +643,17 @@ const handlers = {
       const gQuery = windowId === 'all' ? {} : { windowId: windowId || chrome.windows.WINDOW_ID_CURRENT };
       groups = await chrome.tabGroups.query(gQuery);
     } catch {}
-    // Attach windowId to each tab so the sidebar can show window separators
     const windows = windowId === 'all' ? await chrome.windows.getAll({ windowTypes: ['normal'] }) : [];
-    return { tabs, groups, windows };
+
+    // Attach lastActivity timestamp so the sidebar can show tab-age indicators
+    await ensureTabActivity();
+    const lockedUrls = new Set(await storage.get('lockedUrls', []));
+    const tabsEnriched = tabs.map((t) => ({
+      ...t,
+      _lastActivity: tabActivity.get(t.id) || null,
+      _locked:       lockedUrls.has(t.url),
+    }));
+    return { tabs: tabsEnriched, groups, windows };
   },
   async SWITCH_TAB({ tabId }) {
     const t = await chrome.tabs.get(tabId);
@@ -628,6 +674,79 @@ const handlers = {
 
   async FIND_DUPLICATES() { return await findDuplicates(); },
   async CLOSE_DUPLICATES() { return await closeDuplicates(); },
+
+  // ── Recently Closed Tabs ──────────────────────────────────
+  async GET_RECENT_TABS() {
+    try {
+      const sessions = await chrome.sessions.getRecentlyClosed({ maxResults: 25 });
+      return sessions
+        .filter((s) => s.tab) // tabs only, not windows
+        .map((s) => ({
+          sessionId:  s.tab.sessionId,
+          url:        s.tab.url,
+          title:      s.tab.title,
+          favIconUrl: s.tab.favIconUrl,
+          closedAt:   s.lastModified * 1000, // convert to ms
+        }));
+    } catch { return []; }
+  },
+  async RESTORE_RECENT_TAB({ sessionId, url }) {
+    if (sessionId) {
+      try { await chrome.sessions.restore(sessionId); return true; } catch {}
+    }
+    // Fallback: open URL directly if session restore fails
+    if (url) { await chrome.tabs.create({ url }); return true; }
+    return false;
+  },
+
+  // ── Tab Lock ──────────────────────────────────────────────
+  async LOCK_TAB({ tabId }) {
+    const tab = await chrome.tabs.get(tabId);
+    if (!tab.url) return false;
+    // Add to in-memory map for immediate protection
+    lockedTabIdMap.set(tabId, { url: tab.url, title: tab.title, pinned: tab.pinned });
+    // Persist the URL so the lock survives SW restarts
+    const urls = await storage.get('lockedUrls', []);
+    if (!urls.includes(tab.url)) {
+      urls.push(tab.url);
+      await storage.set('lockedUrls', urls);
+    }
+    return true;
+  },
+  async UNLOCK_TAB({ tabId, url }) {
+    // url can be passed directly when the tabId is no longer valid
+    const resolvedUrl = url || lockedTabIdMap.get(tabId)?.url ||
+      (await chrome.tabs.get(tabId).catch(() => null))?.url;
+    if (resolvedUrl) {
+      const urls = await storage.get('lockedUrls', []);
+      await storage.set('lockedUrls', urls.filter((u) => u !== resolvedUrl));
+    }
+    if (tabId) lockedTabIdMap.delete(tabId);
+    return true;
+  },
+  async GET_LOCKED_URLS() {
+    return await storage.get('lockedUrls', []);
+  },
+
+  // ── Audio Control ─────────────────────────────────────────
+  async TOGGLE_MUTE_TAB({ tabId, muted }) {
+    await chrome.tabs.update(tabId, { muted });
+    return true;
+  },
+  async MUTE_ALL_AUDIO() {
+    const tabs = await chrome.tabs.query({ audible: true, muted: false });
+    for (const t of tabs) {
+      try { await chrome.tabs.update(t.id, { muted: true }); } catch {}
+    }
+    return tabs.length;
+  },
+  async UNMUTE_ALL() {
+    const tabs = await chrome.tabs.query({ muted: true });
+    for (const t of tabs) {
+      try { await chrome.tabs.update(t.id, { muted: false }); } catch {}
+    }
+    return tabs.length;
+  },
 
   async RESTORE_SAVED_SESSION({ session }) {
     // Re-insert a previously deleted session at the top of the list (undo delete)

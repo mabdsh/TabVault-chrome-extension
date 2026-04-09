@@ -5,164 +5,175 @@
   <title>TabVault Settings</title>
   <link rel="stylesheet" href="../shared/shared.css" />
   <style>
-    body { padding: 0; min-height: 100vh; }
+    body { padding: 0; min-height: 100vh; background: var(--bg); }
+
     .options-wrap {
-      max-width: 760px;
+      max-width: 680px;
       margin: 0 auto;
-      padding: 32px 24px 80px;
+      padding: 32px 24px 100px;
     }
+
+    /* ── Page header ── */
     .options-header {
       display: flex;
       align-items: center;
-      gap: 12px;
-      margin-bottom: 32px;
+      gap: 14px;
+      margin-bottom: 36px;
+      padding-bottom: 24px;
+      border-bottom: 1px solid var(--border);
     }
-    .options-header .brand-mark {
-      width: 36px; height: 36px;
-      border-radius: 9px;
-      background: linear-gradient(135deg, var(--accent), #8b5cf6);
-      display: grid;
-      place-items: center;
-      color: white;
-      font-weight: 700;
-      font-size: 14px;
+    .options-brand-icon {
+      width: 44px; height: 44px;
+      border-radius: 12px;
+      background: linear-gradient(135deg, var(--accent) 0%, #8b5cf6 100%);
+      display: grid; place-items: center;
+      color: white; flex-shrink: 0;
+      box-shadow: 0 0 20px var(--accent-glow);
     }
-    .options-header h1 { font-size: 22px; font-weight: 700; }
-    .options-header .sub { font-size: 12px; color: var(--text-dim); }
+    .options-brand-icon svg { width: 22px; height: 22px; stroke-width: 2; }
+    .options-header h1 { font-size: 22px; font-weight: 800; letter-spacing: -0.5px; color: var(--text); }
+    .options-header .sub { font-size: 12.5px; color: var(--text-dim); margin-top: 3px; }
 
+    /* ── Sections ── */
     .section {
       background: var(--bg-elev);
       border: 1px solid var(--border);
       border-radius: var(--radius-lg);
-      padding: 20px 24px;
-      margin-bottom: 16px;
+      margin-bottom: 12px;
+      overflow: hidden;
     }
-    .section h2 {
-      font-size: 14px;
-      font-weight: 700;
-      margin-bottom: 4px;
-      display: flex;
-      align-items: center;
-      gap: 8px;
+    .section-head {
+      padding: 16px 20px 14px;
+      border-bottom: 1px solid var(--border);
+      background: var(--bg-elev-2);
     }
-    .section h2::before {
-      content: '';
-      width: 4px;
-      height: 16px;
-      background: var(--accent);
-      border-radius: 2px;
+    .section-head h2 {
+      font-size: 13px; font-weight: 700; color: var(--text);
+      display: flex; align-items: center; gap: 8px;
+      margin-bottom: 3px;
     }
-    .section .section-desc {
-      font-size: 12px;
-      color: var(--text-dim);
-      margin-bottom: 16px;
-      margin-left: 12px;
+    .section-head h2 .section-icon {
+      font-size: 15px; flex-shrink: 0;
     }
+    .section-desc {
+      font-size: 11.5px;
+      color: var(--text-faint);
+      margin-left: 23px;
+      line-height: 1.5;
+    }
+
+    /* ── Fields ── */
+    .section-body { padding: 4px 0; }
 
     .field {
       display: flex;
       align-items: center;
       justify-content: space-between;
-      padding: 12px 0;
+      padding: 13px 20px;
       border-bottom: 1px solid var(--border);
       gap: 16px;
     }
     .field:last-child { border-bottom: none; }
     .field-info { flex: 1; }
-    .field-label { font-size: 13px; font-weight: 500; }
-    .field-desc { font-size: 11px; color: var(--text-dim); margin-top: 2px; }
+    .field-label { font-size: 13px; font-weight: 500; color: var(--text); }
+    .field-desc { font-size: 11.5px; color: var(--text-faint); margin-top: 3px; line-height: 1.5; }
     .field-control { flex-shrink: 0; }
-
-    /* Toggle switch */
-    .switch {
-      position: relative;
-      display: inline-block;
-      width: 38px;
-      height: 22px;
-    }
-    .switch input { opacity: 0; width: 0; height: 0; }
-    .slider {
-      position: absolute;
-      cursor: pointer;
-      inset: 0;
-      background: var(--border-strong);
-      transition: var(--transition);
-      border-radius: 22px;
-    }
-    .slider::before {
-      position: absolute;
-      content: '';
-      height: 16px;
-      width: 16px;
-      left: 3px;
-      bottom: 3px;
-      background: white;
-      transition: var(--transition);
-      border-radius: 50%;
-    }
-    input:checked + .slider { background: var(--accent); }
-    input:checked + .slider::before { transform: translateX(16px); }
-
-    select {
-      min-width: 140px;
-    }
-
-    textarea {
-      width: 100%;
-      min-height: 80px;
-      resize: vertical;
-      font-family: ui-monospace, monospace;
-      font-size: 11px;
-      margin-top: 8px;
-    }
 
     .field-block {
       display: block;
-      padding: 12px 0;
+      padding: 14px 20px;
       border-bottom: 1px solid var(--border);
     }
     .field-block:last-child { border-bottom: none; }
+    .field-block .field-label { margin-bottom: 4px; }
+    .field-block .field-desc { margin-bottom: 10px; }
 
-    .danger-zone {
-      border-color: var(--danger);
+    /* ── Toggle switch ── */
+    .switch {
+      position: relative; display: inline-block;
+      width: 40px; height: 23px;
     }
-    .kbd-list {
-      list-style: none;
-      padding: 0;
+    .switch input { opacity: 0; width: 0; height: 0; }
+    .slider {
+      position: absolute; cursor: pointer; inset: 0;
+      background: var(--border-strong);
+      transition: var(--transition); border-radius: 23px;
     }
+    .slider::before {
+      position: absolute; content: '';
+      height: 17px; width: 17px;
+      left: 3px; bottom: 3px;
+      background: white;
+      transition: var(--transition); border-radius: 50%;
+    }
+    input:checked + .slider { background: var(--accent); }
+    input:checked + .slider::before { transform: translateX(17px); }
+
+    select { min-width: 150px; }
+
+    textarea {
+      width: 100%; min-height: 80px;
+      resize: vertical;
+      font-family: ui-monospace, monospace;
+      font-size: 11.5px;
+    }
+
+    /* ── Keyboard shortcuts ── */
+    .kbd-list { list-style: none; padding: 0; }
     .kbd-list li {
-      display: flex;
-      justify-content: space-between;
-      padding: 6px 0;
-      border-bottom: 1px solid var(--border);
-      font-size: 12px;
+      display: flex; justify-content: space-between; align-items: center;
+      padding: 11px 20px; border-bottom: 1px solid var(--border);
+      font-size: 12.5px; color: var(--text-dim);
     }
     .kbd-list li:last-child { border-bottom: none; }
     .kbd {
       background: var(--bg-elev-2);
-      border: 1px solid var(--border);
-      padding: 2px 8px;
-      border-radius: 4px;
-      font-family: ui-monospace, monospace;
-      font-size: 11px;
+      border: 1px solid var(--border-strong);
+      padding: 3px 10px; border-radius: 5px;
+      font-family: ui-monospace, monospace; font-size: 11.5px;
+      color: var(--text);
     }
+
+    /* ── Save bar ── */
     .save-bar {
-      position: sticky;
-      bottom: 0;
+      position: fixed; bottom: 0; left: 0; right: 0;
       background: var(--bg-elev);
       padding: 12px 24px;
       border-top: 1px solid var(--border);
-      display: flex;
-      justify-content: flex-end;
-      gap: 8px;
-      margin: 24px -24px -80px;
+      display: flex; justify-content: center; gap: 10px;
+      z-index: 100;
+      box-shadow: 0 -8px 32px rgba(0,0,0,.3);
+    }
+    .save-bar .inner {
+      max-width: 680px; width: 100%;
+      display: flex; justify-content: flex-end; align-items: center; gap: 10px;
+    }
+    #savedHint { font-size: 12px; color: var(--success); font-weight: 600; }
+
+    /* ── About row ── */
+    .about-row {
+      font-size: 12.5px; color: var(--text-dim);
+      padding: 14px 20px; display: flex; align-items: center; gap: 8px;
+    }
+    .version-badge {
+      background: var(--accent-soft); color: var(--accent);
+      border: 1px solid rgba(100,114,244,.3);
+      border-radius: 99px; padding: 2px 10px;
+      font-size: 11.5px; font-weight: 700;
     }
   </style>
 </head>
 <body>
   <div class="options-wrap">
+
+    <!-- Page header -->
     <header class="options-header">
-      <div class="brand-mark">TV</div>
+      <div class="options-brand-icon">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <rect x="3" y="6" width="18" height="13" rx="2.5"/>
+          <path d="M3 10h18M8 6V4M16 6V4"/>
+        </svg>
+      </div>
       <div>
         <h1>TabVault Settings</h1>
         <div class="sub">Configure your tab and bookmark workspace</div>
@@ -171,231 +182,230 @@
 
     <!-- General -->
     <section class="section">
-      <h2>General</h2>
-      <div class="section-desc">Default behavior and appearance</div>
-
-      <div class="field">
-        <div class="field-info">
-          <div class="field-label">Sidebar default view</div>
-          <div class="field-desc">What to show first when the sidebar opens</div>
-        </div>
-        <div class="field-control">
-          <select id="defaultView">
-            <option value="tabs">Tabs</option>
-            <option value="bookmarks">Bookmarks</option>
-            <option value="last">Last used</option>
-          </select>
-        </div>
+      <div class="section-head">
+        <h2><span class="section-icon">⚙</span> General</h2>
+        <div class="section-desc">Default appearance and startup behavior</div>
       </div>
-
-      <div class="field">
-        <div class="field-info">
-          <div class="field-label">Show button in toolbar</div>
-          <div class="field-desc">Display the TabVault icon in the Chrome toolbar</div>
+      <div class="section-body">
+        <div class="field">
+          <div class="field-info">
+            <div class="field-label">Sidebar default view</div>
+            <div class="field-desc">Which tab is shown first when you open the sidebar</div>
+          </div>
+          <div class="field-control">
+            <select id="defaultView">
+              <option value="tabs">Tabs</option>
+              <option value="bookmarks">Bookmarks</option>
+              <option value="last">Last used</option>
+            </select>
+          </div>
         </div>
-        <div class="field-control">
-          <label class="switch"><input type="checkbox" id="showToolbarButton"><span class="slider"></span></label>
+        <div class="field">
+          <div class="field-info">
+            <div class="field-label">Show button in toolbar</div>
+            <div class="field-desc">Display the TabVault icon in Chrome's toolbar for quick access</div>
+          </div>
+          <div class="field-control">
+            <label class="switch"><input type="checkbox" id="showToolbarButton"><span class="slider"></span></label>
+          </div>
         </div>
-      </div>
-
-      <div class="field">
-        <div class="field-info">
-          <div class="field-label">Open sidebar on browser start</div>
-          <div class="field-desc">Automatically open the sidebar when Chrome launches</div>
-        </div>
-        <div class="field-control">
-          <label class="switch"><input type="checkbox" id="openOnStart"><span class="slider"></span></label>
+        <div class="field">
+          <div class="field-info">
+            <div class="field-label">Open sidebar when Chrome starts</div>
+            <div class="field-desc">Automatically open the sidebar panel every time Chrome launches</div>
+          </div>
+          <div class="field-control">
+            <label class="switch"><input type="checkbox" id="openOnStart"><span class="slider"></span></label>
+          </div>
         </div>
       </div>
     </section>
 
     <!-- Tab Management -->
     <section class="section">
-      <h2>Tab Management</h2>
-      <div class="section-desc">Suspender, duplicates, and badges</div>
-
-      <div class="field">
-        <div class="field-info">
-          <div class="field-label">Tab Suspender</div>
-          <div class="field-desc">Automatically suspend tabs that haven't been used recently</div>
-        </div>
-        <div class="field-control">
-          <label class="switch"><input type="checkbox" id="suspenderEnabled"><span class="slider"></span></label>
-        </div>
+      <div class="section-head">
+        <h2><span class="section-icon">🗂</span> Tab Management</h2>
+        <div class="section-desc">Auto-suspend idle tabs to free up memory, and surface duplicate tabs</div>
       </div>
-
-      <div class="field">
-        <div class="field-info">
-          <div class="field-label">Auto-suspend after</div>
-          <div class="field-desc">Idle time before a tab is suspended</div>
+      <div class="section-body">
+        <div class="field">
+          <div class="field-info">
+            <div class="field-label">Tab Suspender</div>
+            <div class="field-desc">Automatically suspend tabs you haven't used recently — click to restore them instantly</div>
+          </div>
+          <div class="field-control">
+            <label class="switch"><input type="checkbox" id="suspenderEnabled"><span class="slider"></span></label>
+          </div>
         </div>
-        <div class="field-control">
-          <select id="suspendAfterMinutes">
-            <option value="15">15 minutes</option>
-            <option value="30">30 minutes</option>
-            <option value="45">45 minutes</option>
-            <option value="60">60 minutes</option>
-            <option value="90">90 minutes</option>
-            <option value="120">120 minutes</option>
-          </select>
+        <div class="field">
+          <div class="field-info">
+            <div class="field-label">Suspend after</div>
+            <div class="field-desc">How long a tab must be idle before it is suspended</div>
+          </div>
+          <div class="field-control">
+            <select id="suspendAfterMinutes">
+              <option value="15">15 minutes</option>
+              <option value="30">30 minutes</option>
+              <option value="45">45 minutes</option>
+              <option value="60">1 hour</option>
+              <option value="90">1.5 hours</option>
+              <option value="120">2 hours</option>
+            </select>
+          </div>
         </div>
-      </div>
-
-      <div class="field-block">
-        <div class="field-label">Never suspend (one URL pattern per line)</div>
-        <div class="field-desc">Supports wildcards, e.g. <code>*://localhost/*</code></div>
-        <textarea id="neverSuspendPatterns" placeholder="*://localhost/*&#10;*://mail.google.com/*"></textarea>
-      </div>
-
-      <div class="field">
-        <div class="field-info">
-          <div class="field-label">Duplicate detection</div>
-          <div class="field-desc">Track and surface duplicate tabs</div>
+        <div class="field-block">
+          <div class="field-label">Never suspend these URLs</div>
+          <div class="field-desc">One pattern per line. Wildcards supported — e.g. <code>*://localhost/*</code> or <code>*://mail.google.com/*</code></div>
+          <textarea id="neverSuspendPatterns" placeholder="*://localhost/*&#10;*://127.0.0.1/*&#10;*://mail.google.com/*"></textarea>
         </div>
-        <div class="field-control">
-          <label class="switch"><input type="checkbox" id="duplicateDetection"><span class="slider"></span></label>
+        <div class="field">
+          <div class="field-info">
+            <div class="field-label">Duplicate tab detection</div>
+            <div class="field-desc">Track duplicate tabs and show a badge count in the sidebar and popup</div>
+          </div>
+          <div class="field-control">
+            <label class="switch"><input type="checkbox" id="duplicateDetection"><span class="slider"></span></label>
+          </div>
         </div>
-      </div>
-
-      <div class="field">
-        <div class="field-info">
-          <div class="field-label">Show tab count badge on icon</div>
-          <div class="field-desc">Display the number of open tabs on the toolbar icon</div>
-        </div>
-        <div class="field-control">
-          <label class="switch"><input type="checkbox" id="showTabBadge"><span class="slider"></span></label>
+        <div class="field">
+          <div class="field-info">
+            <div class="field-label">Show tab count badge on toolbar icon</div>
+            <div class="field-desc">Display the number of open tabs on the TabVault icon</div>
+          </div>
+          <div class="field-control">
+            <label class="switch"><input type="checkbox" id="showTabBadge"><span class="slider"></span></label>
+          </div>
         </div>
       </div>
     </section>
 
     <!-- Bookmark Management -->
     <section class="section">
-      <h2>Bookmark Management</h2>
-      <div class="section-desc">Tagging, notes, and link health</div>
-
-      <div class="field">
-        <div class="field-info">
-          <div class="field-label">Auto-tag new bookmarks</div>
-          <div class="field-desc">Suggest tags based on URL and title</div>
-        </div>
-        <div class="field-control">
-          <label class="switch"><input type="checkbox" id="autoTagBookmarks"><span class="slider"></span></label>
-        </div>
+      <div class="section-head">
+        <h2><span class="section-icon">🔖</span> Bookmarks</h2>
+        <div class="section-desc">Tags, notes, and link health checks for your bookmarks</div>
       </div>
-
-      <div class="field-block">
-        <div class="field-label">Default note template</div>
-        <div class="field-desc">Pre-filled when adding a new note</div>
-        <textarea id="defaultNoteTemplate" placeholder="Source:&#10;Why I saved this:&#10;Tags:"></textarea>
-      </div>
-
-      <div class="field">
-        <div class="field-info">
-          <div class="field-label">Broken link scan schedule</div>
-          <div class="field-desc">How often to automatically check bookmark health</div>
+      <div class="section-body">
+        <div class="field">
+          <div class="field-info">
+            <div class="field-label">Auto-suggest tags for new bookmarks</div>
+            <div class="field-desc">Suggest tags based on the page URL and title when you save a bookmark</div>
+          </div>
+          <div class="field-control">
+            <label class="switch"><input type="checkbox" id="autoTagBookmarks"><span class="slider"></span></label>
+          </div>
         </div>
-        <div class="field-control">
-          <select id="scanSchedule">
-            <option value="never">Never</option>
-            <option value="weekly">Weekly</option>
-            <option value="monthly">Monthly</option>
-          </select>
+        <div class="field-block">
+          <div class="field-label">Default note template</div>
+          <div class="field-desc">Pre-filled text when you add a note to a bookmark</div>
+          <textarea id="defaultNoteTemplate" placeholder="Source:&#10;Why I saved this:&#10;Tags:"></textarea>
         </div>
-      </div>
-
-      <div class="field">
-        <div class="field-info">
-          <div class="field-label">Show bookmark count in sidebar</div>
+        <div class="field">
+          <div class="field-info">
+            <div class="field-label">Broken link scan schedule</div>
+            <div class="field-desc">How often to automatically check all bookmarks for broken links in the background</div>
+          </div>
+          <div class="field-control">
+            <select id="scanSchedule">
+              <option value="never">Never (manual only)</option>
+              <option value="weekly">Weekly</option>
+              <option value="monthly">Monthly</option>
+            </select>
+          </div>
         </div>
-        <div class="field-control">
-          <label class="switch"><input type="checkbox" id="showBookmarkCount"><span class="slider"></span></label>
+        <div class="field">
+          <div class="field-info">
+            <div class="field-label">Show bookmark count in sidebar</div>
+          </div>
+          <div class="field-control">
+            <label class="switch"><input type="checkbox" id="showBookmarkCount"><span class="slider"></span></label>
+          </div>
         </div>
       </div>
     </section>
 
     <!-- Sync & Backup -->
     <section class="section">
-      <h2>Sync & Backup</h2>
-      <div class="section-desc">Export, import, and clear data</div>
-
-      <div class="field">
-        <div class="field-info">
-          <div class="field-label">Export all data</div>
-          <div class="field-desc">Sessions, bookmark metadata, and settings as JSON</div>
-        </div>
-        <div class="field-control">
-          <button class="btn" id="exportBtn">Export</button>
-        </div>
+      <div class="section-head">
+        <h2><span class="section-icon">💾</span> Backup &amp; Restore</h2>
+        <div class="section-desc">Export your sessions, bookmark metadata, and settings to a file, or restore from a previous backup</div>
       </div>
-
-      <div class="field">
-        <div class="field-info">
-          <div class="field-label">Import data</div>
-          <div class="field-desc">Restore from a previously exported JSON file</div>
+      <div class="section-body">
+        <div class="field">
+          <div class="field-info">
+            <div class="field-label">Export all data</div>
+            <div class="field-desc">Downloads sessions, bookmark metadata, and settings as a JSON file. Your API key is excluded for security.</div>
+          </div>
+          <div class="field-control">
+            <button class="btn" id="exportBtn">⬇ Export</button>
+          </div>
         </div>
-        <div class="field-control">
-          <label class="btn">
-            Import
-            <input type="file" accept=".json" id="importInput" style="display:none">
-          </label>
+        <div class="field">
+          <div class="field-info">
+            <div class="field-label">Import data</div>
+            <div class="field-desc">Restore from a JSON file previously exported by TabVault. Merges with your existing data.</div>
+          </div>
+          <div class="field-control">
+            <label class="btn">
+              ⬆ Import
+              <input type="file" accept=".json" id="importInput" style="display:none">
+            </label>
+          </div>
         </div>
-      </div>
-
-      <div class="field">
-        <div class="field-info">
-          <div class="field-label">Clear all data</div>
-          <div class="field-desc">Permanently remove sessions, metadata, and settings</div>
-        </div>
-        <div class="field-control">
-          <button class="btn btn-danger" id="clearBtn">Clear all</button>
+        <div class="field">
+          <div class="field-info">
+            <div class="field-label">Clear all TabVault data</div>
+            <div class="field-desc">Permanently removes all sessions, bookmark metadata, and settings. This cannot be undone.</div>
+          </div>
+          <div class="field-control">
+            <button class="btn btn-danger" id="clearBtn">🗑 Clear all data</button>
+          </div>
         </div>
       </div>
     </section>
 
     <!-- Keyboard Shortcuts -->
     <section class="section">
-      <h2>Keyboard Shortcuts</h2>
-      <div class="section-desc">Configure in <a href="#" id="kbdLink">chrome://extensions/shortcuts</a></div>
-      <ul class="kbd-list">
-        <li><span>Open popup</span><span class="kbd">Ctrl/Cmd + Shift + Y</span></li>
-        <li><span>Open sidebar</span><span class="kbd">Ctrl/Cmd + Shift + U</span></li>
-        <li><span>Save session</span><span class="kbd">Custom (set in shortcuts)</span></li>
-      </ul>
-    </section>
-
-    <!-- AI & Integrations -->
-    <section class="section">
-      <h2>AI &amp; Integrations</h2>
-      <div class="section-desc">Power up Smart Auto-Grouping with Claude AI</div>
-
-      <div class="field">
-        <div class="field-info">
-          <div class="field-label">Anthropic API key</div>
-          <div class="field-desc">
-            Required for Smart Auto-Grouping. Get a key at
-            <a href="https://console.anthropic.com" target="_blank" style="color:var(--accent)">console.anthropic.com</a>.
-            Stored locally — never sent anywhere except the Anthropic API.
-          </div>
-        </div>
-        <div class="field-control">
-          <input type="password" id="anthropicApiKey" placeholder="sk-ant-…" style="min-width:220px;" autocomplete="off" />
+      <div class="section-head">
+        <h2><span class="section-icon">⌨</span> Keyboard Shortcuts</h2>
+        <div class="section-desc">
+          Shortcuts are suggestions — if another extension claims the same combination,
+          Chrome silently skips it. Use
+          <a href="#" id="kbdLink" style="color:var(--accent)">Chrome Extensions → Keyboard shortcuts</a>
+          to set or override them manually.
         </div>
       </div>
+      <ul class="kbd-list">
+        <li><span>Open TabVault popup</span><span class="kbd">Ctrl+Shift+Y &nbsp;/&nbsp; ⌘⇧Y</span></li>
+        <li><span>Open TabVault sidebar</span><span class="kbd">Ctrl+Shift+U &nbsp;/&nbsp; ⌘⇧U</span></li>
+        <li><span>Save current session</span><span class="kbd">Set in Chrome shortcuts</span></li>
+      </ul>
     </section>
 
     <!-- About -->
     <section class="section">
-      <h2>About</h2>
-      <div class="section-desc">TabVault — your unified tab and bookmark workspace</div>
-      <div style="font-size:12px;color:var(--text-dim);">
-        Version <strong style="color:var(--text)">1.0.0</strong> ·
-        <a href="https://github.com/" target="_blank" style="color:var(--accent)">Changelog</a> ·
-        <a href="https://github.com/" target="_blank" style="color:var(--accent)">Feedback</a>
+      <div class="section-head">
+        <h2><span class="section-icon">ℹ</span> About TabVault</h2>
+        <div class="section-desc">Your all-in-one tab and bookmark workspace for Chrome</div>
+      </div>
+      <div class="section-body">
+        <div class="about-row">
+          <span class="version-badge">v1.0.0</span>
+          <span>·</span>
+          <a href="https://github.com/" target="_blank" style="color:var(--accent)">Changelog</a>
+          <span>·</span>
+          <a href="https://github.com/" target="_blank" style="color:var(--accent)">Send feedback</a>
+        </div>
       </div>
     </section>
 
-    <div class="save-bar">
-      <span id="savedHint" style="font-size:11px;color:var(--text-dim);align-self:center;"></span>
+  </div>
+
+  <!-- Sticky save bar -->
+  <div class="save-bar">
+    <div class="inner">
+      <span id="savedHint"></span>
+      <button class="btn" id="cancelBtn">Cancel</button>
       <button class="btn btn-primary" id="saveBtn">Save changes</button>
     </div>
   </div>

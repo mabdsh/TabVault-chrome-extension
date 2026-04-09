@@ -12,90 +12,202 @@
       min-height: 100vh;
       padding: 24px;
     }
+
     .card {
-      max-width: 420px;
-      text-align: center;
+      max-width: 440px;
+      width: 100%;
       background: var(--bg-elev);
       border: 1px solid var(--border);
       border-radius: var(--radius-lg);
-      padding: 40px 32px;
-      box-shadow: var(--shadow);
+      box-shadow: var(--shadow-lg);
+      overflow: hidden;
     }
-    .moon {
-      font-size: 56px;
-      margin-bottom: 12px;
-      filter: grayscale(1);
-      opacity: 0.7;
+
+    /* Top accent bar */
+    .card-bar {
+      height: 3px;
+      background: linear-gradient(90deg, var(--accent) 0%, #8b5cf6 100%);
     }
-    h1 {
-      font-size: 18px;
-      margin-bottom: 6px;
+
+    .card-body {
+      padding: 36px 32px 32px;
+      text-align: center;
     }
-    .desc {
-      font-size: 12px;
-      color: var(--text-dim);
-      margin-bottom: 24px;
-    }
-    .url-row {
-      display: flex;
-      align-items: center;
-      gap: 8px;
-      padding: 10px 12px;
+
+    /* Icon */
+    .sleep-icon {
+      width: 56px;
+      height: 56px;
+      border-radius: 16px;
       background: var(--bg-elev-2);
       border: 1px solid var(--border);
-      border-radius: var(--radius-sm);
+      display: grid;
+      place-items: center;
+      margin: 0 auto 20px;
+      font-size: 26px;
+    }
+
+    h1 {
+      font-size: 19px;
+      font-weight: 800;
+      color: var(--text);
+      letter-spacing: -0.3px;
+      margin-bottom: 6px;
+    }
+
+    .subtitle {
+      font-size: 13px;
+      color: var(--text-dim);
+      line-height: 1.5;
       margin-bottom: 24px;
+    }
+
+    /* Page info card */
+    .page-info {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      padding: 12px 14px;
+      background: var(--bg-elev-2);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      margin-bottom: 20px;
       text-align: left;
     }
-    .url-row img {
-      width: 20px;
-      height: 20px;
-      border-radius: 4px;
+
+    .page-favicon {
+      width: 28px;
+      height: 28px;
+      border-radius: 7px;
+      background: var(--bg-elev-3);
+      flex-shrink: 0;
+      object-fit: contain;
     }
-    .url-info { flex: 1; min-width: 0; }
-    .url-title {
-      font-size: 13px;
-      font-weight: 500;
+
+    .page-text { flex: 1; min-width: 0; }
+
+    .page-title {
+      font-size: 13.5px;
+      font-weight: 600;
+      color: var(--text);
       white-space: nowrap;
       overflow: hidden;
       text-overflow: ellipsis;
+      line-height: 1.3;
     }
-    .url-domain {
-      font-size: 11px;
+
+    .page-domain {
+      font-size: 11.5px;
       color: var(--text-faint);
       white-space: nowrap;
       overflow: hidden;
       text-overflow: ellipsis;
+      margin-top: 2px;
     }
+
+    /* Restore button */
     .restore-btn {
       width: 100%;
       justify-content: center;
-      padding: 12px;
-      font-size: 13px;
+      padding: 13px;
+      font-size: 14px;
+      font-weight: 700;
+      border-radius: var(--radius);
+      background: var(--accent);
+      border-color: var(--accent);
+      color: #fff;
+      letter-spacing: -0.1px;
+      transition: background var(--transition), box-shadow var(--transition), transform var(--transition);
     }
+    .restore-btn:hover {
+      background: var(--accent-hover);
+      box-shadow: 0 0 0 4px var(--accent-glow);
+    }
+    .restore-btn:active { transform: scale(0.98); }
+
+    /* Keyboard hint */
     .hint {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 8px;
+      margin-top: 14px;
+      font-size: 11.5px;
+      color: var(--text-faint);
+    }
+    .hint kbd {
+      background: var(--bg-elev-3);
+      border: 1px solid var(--border-strong);
+      border-radius: 4px;
+      padding: 2px 8px;
+      font-family: inherit;
+      font-size: 11px;
+      color: var(--text-dim);
+    }
+
+    /* Footer */
+    .card-footer {
+      padding: 12px 20px;
+      border-top: 1px solid var(--border);
+      background: var(--bg);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 6px;
       font-size: 11px;
       color: var(--text-faint);
-      margin-top: 16px;
+    }
+    .card-footer .brand-dot {
+      width: 16px;
+      height: 16px;
+      border-radius: 4px;
+      background: linear-gradient(135deg, var(--accent) 0%, #8b5cf6 100%);
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 9px;
+      color: white;
+      font-weight: 800;
+      flex-shrink: 0;
     }
   </style>
 </head>
 <body>
   <div class="card">
-    <div class="moon">💤</div>
-    <h1>Tab suspended</h1>
-    <p class="desc">This tab was put to sleep to save memory.</p>
+    <div class="card-bar"></div>
 
-    <div class="url-row">
-      <img id="favicon" alt="" />
-      <div class="url-info">
-        <div class="url-title" id="title">Loading…</div>
-        <div class="url-domain" id="domain"></div>
+    <div class="card-body">
+      <div class="sleep-icon">💤</div>
+
+      <h1>Tab suspended</h1>
+      <p class="subtitle">
+        This tab was put to sleep by TabVault to save memory.<br>
+        Your page is safe — click below to restore it instantly.
+      </p>
+
+      <div class="page-info">
+        <img id="favicon" class="page-favicon" alt="" />
+        <div class="page-text">
+          <div class="page-title" id="title">Loading…</div>
+          <div class="page-domain" id="domain"></div>
+        </div>
+      </div>
+
+      <button class="btn btn-primary restore-btn" id="restoreBtn">
+        Restore this tab
+      </button>
+
+      <div class="hint">
+        <span>or press</span>
+        <kbd>Enter</kbd>
+        <span>to restore</span>
       </div>
     </div>
 
-    <button class="btn btn-primary restore-btn" id="restoreBtn">Click to restore</button>
-    <div class="hint">Suspended by TabVault</div>
+    <div class="card-footer">
+      <span class="brand-dot">TV</span>
+      Suspended by TabVault · your tabs are safe
+    </div>
   </div>
 
   <script src="suspended.js"></script>

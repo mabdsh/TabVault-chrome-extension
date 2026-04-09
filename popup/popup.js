@@ -127,13 +127,29 @@ function setView(view) {
   else render();
 }
 
+// Produces readable, locale-safe names. Example: "Apr 9 at 10:45 AM"
+function sessionDefaultName() {
+  const d = new Date();
+  const date = d.toLocaleDateString('en', { month: 'short', day: 'numeric' });
+  const time = d.toLocaleTimeString('en', { hour: '2-digit', minute: '2-digit' });
+  return `${date} at ${time}`;
+}
+
 function render() {
   const body = $('#popupBody');
   body.innerHTML = '';
-  if (state.view === 'tabs')      renderTabs(body);
-  else if (state.view === 'sessions')  renderSessions(body);
-  else if (state.view === 'bookmarks') renderBookmarks(body);
-  else if (state.view === 'reading')   renderReadingList(body);
+  try {
+    if (state.view === 'tabs')           renderTabs(body);
+    else if (state.view === 'sessions')  renderSessions(body);
+    else if (state.view === 'bookmarks') renderBookmarks(body);
+    else if (state.view === 'reading')   renderReadingList(body);
+  } catch (err) {
+    console.error('[TabVault popup] render error:', err);
+    body.appendChild(el('div', { class: 'popup-empty' }, [
+      el('strong', {}, 'Something went wrong'),
+      el('p', {}, 'Try closing and reopening the popup. If the problem persists, reload the extension from chrome://extensions.'),
+    ]));
+  }
 }
 
 // ---------- TABS view ----------
@@ -255,7 +271,7 @@ function tabRow(tab) {
 
   if (!isLocked) {
     const closeBtn = el('button', {
-      class: 'danger',
+      class: 'btn-close',
       title: 'Close',
       'aria-label': `Close tab: ${tab.title || 'untitled'}`,
       onclick: async (e) => {
@@ -310,7 +326,7 @@ function renderSessions(body) {
     `Saved sessions (${state.sessions.length})`,
     el('button', {
       onclick: async () => {
-        const name = await modalPrompt('Session name', 'Session ' + new Date().toLocaleString());
+        const name = await modalPrompt('Session name', sessionDefaultName());
         if (!name) return;
         await send('SAVE_SESSION', { name, tags: [] });
         toast('Session saved', 'success');
@@ -599,7 +615,7 @@ function attachListeners() {
 
   // Quick actions
   $('#saveSessionBtn').addEventListener('click', async () => {
-    const name = await modalPrompt('Session name', 'Session ' + new Date().toLocaleString());
+    const name = await modalPrompt('Session name', sessionDefaultName());
     if (!name) return;
     await send('SAVE_SESSION', { name, tags: [] });
     toast('Session saved', 'success');

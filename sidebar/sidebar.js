@@ -5,6 +5,14 @@ import {
   toast, showUndoToast, modalPrompt, modalConfirm, flatten,
 } from '../shared/common.js';
 
+// Produces readable, locale-safe session/workspace names. Example: "Apr 9 at 10:45 AM"
+function sessionDefaultName() {
+  const d = new Date();
+  const date = d.toLocaleDateString('en', { month: 'short', day: 'numeric' });
+  const time = d.toLocaleTimeString('en', { hour: '2-digit', minute: '2-digit' });
+  return `${date} at ${time}`;
+}
+
 const state = {
   view: 'tabs',
   tabs: [],
@@ -18,7 +26,7 @@ const state = {
   workspaces: [],
   domainSummary: [],
   analytics: null,
-  focusMode: { active: false },  // Focus Mode state
+  focusMode: { active: false },
   sessions: [],
   bookmarkTree: [],
   bookmarkMeta: {},
@@ -31,6 +39,9 @@ const state = {
   scanProgress: null,
   openFolders: new Set(),
   selectionMode: false,
+  // Pagination cursors — reset to 0 when the view reloads fresh data
+  sessionsPage: 0,
+  readingPage: 0,
 };
 
 // ----- Views router -----
@@ -159,25 +170,55 @@ function renderWelcomeCard() {
   document.body.appendChild(backdrop);
 }
 
-// Fix 3: Listen for scan progress written by background.js into storage.
-// This replaces the broken "frozen at 0" pattern where progress had no channel back.
 function setupScanProgressListener() {
   chrome.storage.onChanged.addListener((changes, area) => {
     if (area !== 'local' || !changes.scanProgress) return;
     const progress = changes.scanProgress.newValue;
     if (!progress) return;
+
     if (progress.running) {
+      // Update local state
       state.scanProgress = { done: progress.done, total: progress.total };
+      // Try to update the progress bar in-place without a full re-render.
+      // A full render would destroy and recreate the DOM every 300ms — causing
+      // flicker and being much slower than a targeted DOM update.
+      if (!updateScanProgressDOM(progress.done, progress.total)) {
+        // Elements aren't in the DOM yet (user just navigated to broken view).
+        if (state.view === 'broken') render();
+      }
     } else {
-      // Scan finished — reload metadata then clear progress indicator
+      // Scan finished, aborted, or errored
+      state.scanProgress = null;
+
+      if (progress.aborted) {
+        toast('Scan stopped', 'info');
+      } else if (progress.error) {
+        toast('Scan failed: ' + progress.error, 'error');
+      } else {
+        const total = progress.total ?? 0;
+        toast(`Scan complete — ${total} bookmark${total === 1 ? '' : 's'} checked`, 'success');
+      }
+
+      // Reload all bookmark metadata (scan wrote bkm_meta_* keys) then re-render
       refreshAll().then(() => {
-        state.scanProgress = null;
         if (state.view === 'broken') render();
       });
-      return;
     }
-    if (state.view === 'broken') render();
   });
+}
+
+// Update the scan progress elements in place. Returns true if the elements
+// were found in the DOM, false if a full render is needed.
+function updateScanProgressDOM(done, total) {
+  const text = document.getElementById('scanProgressText');
+  const fill = document.getElementById('scanProgressFill');
+  const pct  = document.getElementById('scanProgressPct');
+  if (!text || !fill) return false;
+  const percent = total > 0 ? Math.round((done / total) * 100) : 0;
+  text.textContent = `Checking ${done} of ${total} bookmarks`;
+  fill.style.width = percent + '%';
+  if (pct) pct.textContent = percent + '%';
+  return true;
 }
 
 async function refreshAll() {
@@ -210,6 +251,9 @@ async function refreshAll() {
     state.focusMode      = focusState       || { active: false };
     state.flatBookmarks  = [];
     flatten(state.bookmarkTree, state.flatBookmarks);
+    // Reset pagination whenever a full refresh brings new data
+    state.sessionsPage = 0;
+    state.readingPage  = 0;
     if (state.focusMode.active) startFocusTimer();
     updateNavBadges();
   } catch (e) {
@@ -344,98 +388,110 @@ views.tabs = function (root) {
   if (state.windowFilter) windowPicker.value = state.windowFilter;
 
   const header = el('div', { class: 'panel-header' }, [
-    el('h2', {}, state.selectionMode ? `Select tabs (${state.selectedTabIds.size})` : 'Open Tabs'),
+    el('h2', {}, state.selectionMode
+      ? `${state.selectedTabIds.size} tab${state.selectedTabIds.size === 1 ? '' : 's'} selected`
+      : `Open Tabs`),
     windowPicker,
     el('div', { class: 'panel-actions' }, [
+      // Mute All — shown when audio is playing
+      (hasAudio && !state.selectionMode) ? el('button', {
+        class: 'btn btn-audio-mute',
+        title: `Mute all ${audioTabs.length} playing tab${audioTabs.length === 1 ? '' : 's'}`,
+        'aria-label': 'Mute all playing tabs',
+        onclick: async () => {
+          await send('MUTE_ALL_AUDIO');
+          await refreshAll(); render();
+        },
+      }, [el('span', { class: 'audio-pulse' }), `Mute all (${audioTabs.length})`]) : null,
+      (hasMuted && !hasAudio && !state.selectionMode) ? el('button', {
+        class: 'btn btn-ghost',
+        title: 'Unmute all tabs',
+        onclick: async () => { await send('UNMUTE_ALL'); await refreshAll(); render(); },
+      }, 'Unmute all') : null,
       el('button', {
         class: 'btn' + (state.selectionMode ? ' btn-primary' : ' btn-ghost'),
-        title: 'Toggle selection mode',
+        title: state.selectionMode ? 'Exit selection mode' : 'Select multiple tabs',
         onclick: () => {
           state.selectionMode = !state.selectionMode;
           state.selectedTabIds.clear();
           render();
         },
       }, state.selectionMode ? 'Done' : 'Select'),
-      state.selectionMode ? el('button', {
-        class: 'btn',
-        title: 'Group selected tabs',
-        onclick: groupSelected,
-      }, `Group (${state.selectedTabIds.size})`) : null,
-      state.selectionMode ? el('button', {
-        class: 'btn btn-danger',
-        title: 'Close selected',
-        'aria-label': 'Close selected tabs',
-        onclick: async () => {
-          if (state.selectedTabIds.size === 0) return;
-          // Snapshot tab info before closing so the undo toast can restore them.
-          const toClose = state.tabs.filter((t) => state.selectedTabIds.has(t.id));
-          const snapshots = toClose.map((t) => ({ url: t.url, title: t.title, pinned: t.pinned }));
-          for (const t of toClose) {
-            try { await send('CLOSE_TAB', { tabId: t.id }); } catch {}
-          }
-          state.selectedTabIds.clear();
-          state.selectionMode = false;
-          await refreshTabs();
-          render();
-          const count = snapshots.length;
-          showUndoToast(
-            `Closed ${count} tab${count === 1 ? '' : 's'}`,
-            async () => {
-              for (const s of snapshots) {
-                try { await send('OPEN_URL', { url: s.url, pinned: s.pinned }); } catch {}
-              }
-              await refreshTabs(); render();
-            },
-          );
-        },
-      }, 'Close') : null,
-      !state.selectionMode ? el('button', {
-        class: 'btn',
-        title: 'Auto-group by domain',
-        onclick: async () => {
-          const n = await send('AUTO_GROUP_TABS');
-          toast(`Created ${n} group${n === 1 ? '' : 's'}`, 'success');
-          await refreshAll();
-          render();
-        },
-      }, 'Auto-group') : null,
-      // Smart Auto-Grouping (AI)
-      !state.selectionMode ? el('button', {
-        class: 'btn btn-smart-group',
-        id: 'smartGroupBtn',
-        title: 'Use AI to group tabs by topic',
-        onclick: () => runSmartGrouping(),
-      }, [
-        (() => {
-          const ns = 'http://www.w3.org/2000/svg';
-          const s  = document.createElementNS(ns, 'svg');
-          s.setAttribute('class', 'icon'); s.setAttribute('viewBox', '0 0 24 24');
-          s.innerHTML = '<path d="M12 2a5 5 0 015 5v3h1a2 2 0 012 2v7a2 2 0 01-2 2H6a2 2 0 01-2-2v-7a2 2 0 012-2h1V7a5 5 0 015-5z"/><circle cx="12" cy="16" r="1.5"/>';
-          return s;
-        })(),
-        'Smart Group',
-      ]) : null,
-      // Mute All — only shown when audio is playing
-      (hasAudio && !state.selectionMode) ? el('button', {
-        class: 'btn btn-audio-mute',
-        title: `Mute all ${audioTabs.length} playing tab${audioTabs.length === 1 ? '' : 's'}`,
-        onclick: async () => {
-          await send('MUTE_ALL_AUDIO');
-          await refreshAll(); render();
-        },
-      }, [
-        el('span', { class: 'audio-pulse' }),
-        `Mute all (${audioTabs.length})`,
-      ]) : null,
-      // Unmute All — only shown when tabs are muted
-      (hasMuted && !hasAudio && !state.selectionMode) ? el('button', {
-        class: 'btn btn-ghost',
-        title: 'Unmute all tabs',
-        onclick: async () => { await send('UNMUTE_ALL'); await refreshAll(); render(); },
-      }, 'Unmute all') : null,
     ].filter(Boolean)),
   ]);
   panel.appendChild(header);
+
+  // ── Toolbar: always-visible quick actions ───────────────────
+  if (state.selectionMode) {
+    // Selection mode toolbar
+    const selToolbar = el('div', { class: 'panel-toolbar' });
+    selToolbar.appendChild(el('span', { class: 'toolbar-label' }, 'With selected:'));
+    selToolbar.appendChild(el('button', {
+      class: 'btn',
+      title: 'Group selected tabs into a named Chrome tab group',
+      onclick: groupSelected,
+    }, `Group (${state.selectedTabIds.size})`));
+    selToolbar.appendChild(el('button', {
+      class: 'btn btn-danger',
+      title: 'Close all selected tabs (undo available)',
+      'aria-label': 'Close selected tabs',
+      onclick: async () => {
+        if (state.selectedTabIds.size === 0) return;
+        const toClose = state.tabs.filter((t) => state.selectedTabIds.has(t.id));
+        const snapshots = toClose.map((t) => ({ url: t.url, title: t.title, pinned: t.pinned }));
+        for (const t of toClose) {
+          try { await send('CLOSE_TAB', { tabId: t.id }); } catch {}
+        }
+        state.selectedTabIds.clear();
+        state.selectionMode = false;
+        await refreshTabs();
+        render();
+        const count = snapshots.length;
+        showUndoToast(
+          `Closed ${count} tab${count === 1 ? '' : 's'}`,
+          async () => {
+            for (const s of snapshots) {
+              try { await send('OPEN_URL', { url: s.url, pinned: s.pinned }); } catch {}
+            }
+            await refreshTabs(); render();
+          },
+        );
+      },
+    }, `Close (${state.selectedTabIds.size})`));
+    panel.appendChild(selToolbar);
+  } else {
+    // Normal mode toolbar
+    const toolbar = el('div', { class: 'panel-toolbar' });
+    toolbar.appendChild(el('button', {
+      class: 'btn',
+      title: 'Save all open tabs as a named session you can restore later',
+      onclick: async (e) => {
+        const btn = e.currentTarget;
+        const name = await modalPrompt('Name this session', sessionDefaultName());
+        if (!name) return;
+        btn.disabled = true; btn.textContent = 'Saving…';
+        try {
+          await send('SAVE_SESSION', { name, tags: [] });
+          toast('Session saved — find it in Sessions', 'success');
+          await refreshAll(); render();
+        } finally { btn.disabled = false; btn.textContent = '💾 Save session'; }
+      },
+    }, '💾 Save session'));
+    toolbar.appendChild(el('button', {
+      class: 'btn',
+      title: 'Automatically group tabs by their domain into Chrome tab groups',
+      onclick: async (e) => {
+        const btn = e.currentTarget;
+        btn.disabled = true; btn.textContent = 'Grouping…';
+        try {
+          const n = await send('AUTO_GROUP_TABS');
+          toast(`Created ${n} group${n === 1 ? '' : 's'}`, 'success');
+          await refreshAll(); render();
+        } finally { btn.disabled = false; btn.textContent = '🗂 Auto-group'; }
+      },
+    }, '🗂 Auto-group'));
+    panel.appendChild(toolbar);
+  }
 
   // Focus Mode banner — shown when focus mode is active
   if (state.focusMode.active) {
@@ -784,7 +840,7 @@ function tabRow(tab) {
     }, '💤'),
     // Close — hidden for locked tabs
     !isLocked ? el('button', {
-      class: 'btn btn-icon btn-ghost',
+      class: 'btn btn-icon btn-ghost btn-close',
       title: 'Close',
       'aria-label': `Close tab: ${tab.title || 'untitled'}`,
       onclick: async (e) => {
@@ -856,27 +912,38 @@ async function groupSelected() {
 views.sessions = function (root) {
   const panel = el('div', { class: 'panel' });
   panel.appendChild(el('div', { class: 'panel-header' }, [
-    el('h2', {}, 'Saved Sessions'),
-    el('div', { class: 'panel-actions' }, [
-      el('button', {
-        class: 'btn btn-primary',
-        onclick: async () => {
-          const name = await modalPrompt('Session name', 'Session ' + new Date().toLocaleString());
-          if (!name) return;
-          await send('SAVE_SESSION', { name, tags: [] });
-          toast('Session saved', 'success');
-          await refreshAll();
-          render();
-        },
-      }, '+ Save current'),
-    ]),
+    el('h2', {}, `Sessions ${state.sessions.length > 0 ? `(${state.sessions.length})` : ''}`),
+  ]));
+  panel.appendChild(el('div', { class: 'panel-toolbar' }, [
+    el('button', {
+      class: 'btn btn-primary',
+      title: 'Save all tabs in the current window as a named session',
+      onclick: async () => {
+        const name = await modalPrompt('Name this session', sessionDefaultName());
+        if (!name) return;
+        await send('SAVE_SESSION', { name, tags: [] });
+        toast('Session saved', 'success');
+        await refreshAll(); render();
+      },
+    }, '💾 Save current tabs as session'),
   ]));
 
   const body = el('div', { class: 'panel-body' });
   if (state.sessions.length === 0) {
-    body.appendChild(emptyState('No sessions saved yet', 'Save your current tabs as a session to restore them later.'));
+    body.appendChild(emptyState('No sessions saved yet',
+      'Save your open tabs as a named session — restore the whole window with one click, any time.'));
   } else {
-    for (const s of state.sessions) body.appendChild(sessionCard(s));
+    const PAGE = 12;
+    const shown = state.sessions.slice(0, (state.sessionsPage + 1) * PAGE);
+    for (const s of shown) body.appendChild(sessionCard(s));
+    if (state.sessions.length > shown.length) {
+      const remaining = state.sessions.length - shown.length;
+      body.appendChild(el('button', {
+        class: 'btn',
+        style: { width: '100%', marginTop: '8px', justifyContent: 'center' },
+        onclick: () => { state.sessionsPage++; render(); },
+      }, `Show ${Math.min(PAGE, remaining)} more of ${remaining} remaining…`));
+    }
   }
   panel.appendChild(body);
   root.appendChild(panel);
@@ -925,18 +992,33 @@ function sessionCard(s) {
   card.appendChild(el('div', { class: 'session-actions' }, [
     el('button', {
       class: 'btn btn-primary',
+      title: 'Open all tabs from this session in a new window',
       onclick: async () => {
         await send('RESTORE_SESSION', { id: s.id, mode: 'new' });
         toast('Restored in new window', 'success');
       },
-    }, 'Restore'),
+    }, 'Restore in new window'),
     el('button', {
       class: 'btn',
+      title: 'Open all tabs from this session in the current window',
       onclick: async () => {
         await send('RESTORE_SESSION', { id: s.id, mode: 'merge' });
         toast('Merged into current window', 'success');
       },
-    }, 'Merge'),
+    }, 'Merge here'),
+    el('button', {
+      class: 'btn btn-ghost',
+      title: 'Rename this session',
+      onclick: async () => {
+        const name = await modalPrompt('Rename session', s.name);
+        if (!name || name === s.name) return;
+        s.name = name;
+        const list = await send('GET_ALL_SESSIONS');
+        const target = list.find((x) => x.id === s.id);
+        if (target) { target.name = name; await send('SAVE_SESSION', { ...target }); }
+        await refreshAll(); render();
+      },
+    }, 'Rename'),
   ]));
   return card;
 }
@@ -947,17 +1029,27 @@ function sessionCard(s) {
 views.bookmarks = function (root) {
   const panel = el('div', { class: 'panel' });
   panel.appendChild(el('div', { class: 'panel-header' }, [
-    el('h2', {}, 'Bookmarks' + (state.activeTag ? ` · #${state.activeTag}` : '')),
+    el('h2', {}, state.activeTag ? `Bookmarks · #${state.activeTag}` : 'Bookmarks'),
     el('div', { class: 'panel-actions' }, [
-      state.activeTag ? el('button', { class: 'btn', onclick: () => { state.activeTag = null; render(); } }, 'Clear filter') : null,
-      el('button', { class: 'btn', onclick: exportBookmarks }, 'Export'),
-      el('label', { class: 'btn' }, [
-        'Import',
-        el('input', {
-          type: 'file', accept: '.html', style: { display: 'none' }, onchange: importBookmarks,
-        }),
-      ]),
+      state.activeTag ? el('button', {
+        class: 'btn btn-ghost',
+        title: 'Clear tag filter and show all bookmarks',
+        onclick: () => { state.activeTag = null; render(); },
+      }, '✕ Clear filter') : null,
     ].filter(Boolean)),
+  ]));
+  panel.appendChild(el('div', { class: 'panel-toolbar' }, [
+    el('button', {
+      class: 'btn', title: 'Export all bookmarks to an HTML file you can import in any browser',
+      onclick: exportBookmarks,
+    }, '⬇ Export bookmarks'),
+    el('label', {
+      class: 'btn',
+      title: 'Import bookmarks from an HTML file exported by any browser',
+    }, [
+      '⬆ Import bookmarks',
+      el('input', { type: 'file', accept: '.html', style: { display: 'none' }, onchange: importBookmarks }),
+    ]),
   ]));
 
   const body = el('div', { class: 'panel-body' });
@@ -1190,40 +1282,120 @@ views.duplicates = function (root) {
 // BROKEN LINKS VIEW
 // ===========================================================================
 views.broken = function (root) {
-  const panel = el('div', { class: 'panel' });
+  const panel    = el('div', { class: 'panel' });
+  const scanning = !!state.scanProgress;
+
+  // ── Header ──────────────────────────────────────────────────────
   panel.appendChild(el('div', { class: 'panel-header' }, [
     el('h2', {}, 'Broken Link Scanner'),
     el('div', { class: 'panel-actions' }, [
-      el('button', {
-        class: 'btn btn-primary',
-        onclick: runScan,
-      }, 'Scan all bookmarks'),
-      el('button', {
+      scanning ? null : el('button', {
         class: 'btn btn-danger',
+        title: 'Delete all bookmarks that returned an error in the last scan',
         onclick: cleanBroken,
-      }, 'Clean broken'),
-    ]),
+      }, '🗑 Delete all broken'),
+    ].filter(Boolean)),
   ]));
+
+  // ── Toolbar ─────────────────────────────────────────────────────
+  panel.appendChild(el('div', { class: 'panel-toolbar' }, [
+    el('button', {
+      class: 'btn btn-primary',
+      id: 'scanStartBtn',
+      title: 'Check every bookmark URL to find broken or dead links',
+      disabled: scanning,
+      onclick: runScan,
+    }, scanning ? '⏳ Scanning…' : '🔍 Scan all bookmarks'),
+    scanning ? el('button', {
+      class: 'btn btn-danger',
+      title: 'Stop the scan after the current batch finishes',
+      onclick: async () => {
+        await send('ABORT_SCAN');
+        state.scanProgress = null;
+        render();
+      },
+    }, '⏹ Stop') : null,
+  ].filter(Boolean)));
 
   const body = el('div', { class: 'panel-body' });
   body.id = 'brokenBody';
 
-  const broken = state.flatBookmarks
-    .map((bm) => ({ bm, meta: state.bookmarkMeta[bm.id] || {} }))
-    .filter(({ meta }) => meta.scanStatus === 'broken');
+  // ── Progress section — shown while scan is running ───────────────
+  if (scanning) {
+    const done    = state.scanProgress.done  ?? 0;
+    const total   = state.scanProgress.total ?? 0;
+    const percent = total > 0 ? Math.round((done / total) * 100) : 0;
 
-  if (state.scanProgress) {
-    const pct = Math.round((state.scanProgress.done / state.scanProgress.total) * 100);
-    body.appendChild(el('div', { style: { padding: '12px' } }, [
-      el('div', { style: { fontSize: '12px', marginBottom: '6px' } }, `Scanning ${state.scanProgress.done}/${state.scanProgress.total}…`),
-      el('div', { class: 'progress' }, [el('div', { class: 'progress-fill', style: { width: pct + '%' } })]),
-    ]));
-  } else if (broken.length === 0) {
-    body.appendChild(emptyState('✓ All bookmarks are healthy', 'Run a scan to verify.'));
+    const progressWrap = el('div', { class: 'scan-progress-wrap' });
+
+    // Header row: label + percentage
+    const headerRow = el('div', { class: 'scan-progress-header' }, [
+      el('span', { id: 'scanProgressText', class: 'scan-progress-label' },
+        `Checking ${done} of ${total} bookmarks`),
+      el('span', { id: 'scanProgressPct', class: 'scan-progress-pct' },
+        percent + '%'),
+    ]);
+    progressWrap.appendChild(headerRow);
+
+    // Progress bar track + fill
+    const track = el('div', { class: 'scan-progress-track' });
+    const fill  = el('div', {
+      id: 'scanProgressFill',
+      class: 'scan-progress-fill',
+      style: { width: percent + '%' },
+    });
+    track.appendChild(fill);
+    progressWrap.appendChild(track);
+
+    // Hint text
+    progressWrap.appendChild(el('div', { class: 'scan-progress-hint' },
+      'TabVault is checking each bookmark URL. This can take a few minutes for large libraries.'));
+
+    body.appendChild(progressWrap);
+
+    // Also show previously-known broken bookmarks while scan runs
+    const broken = state.flatBookmarks
+      .map((bm) => ({ bm, meta: state.bookmarkMeta[bm.id] || {} }))
+      .filter(({ meta }) => meta.scanStatus === 'broken');
+
+    if (broken.length > 0) {
+      body.appendChild(el('div', { class: 'scan-prev-label' },
+        `Previous scan found ${broken.length} broken bookmark${broken.length === 1 ? '' : 's'}:`));
+      for (const { bm } of broken) body.appendChild(bookmarkRow(bm));
+    }
+
   } else {
-    body.appendChild(el('div', { style: { padding: '8px 12px', fontSize: '11px', color: 'var(--text-dim)' } },
-      `${broken.length} broken bookmark${broken.length === 1 ? '' : 's'}`));
-    for (const { bm } of broken) body.appendChild(bookmarkRow(bm));
+    // ── Results section — shown when not scanning ──────────────────
+    const allScanned = state.flatBookmarks.some(
+      (bm) => state.bookmarkMeta[bm.id]?.scanStatus
+    );
+    const broken = state.flatBookmarks
+      .map((bm) => ({ bm, meta: state.bookmarkMeta[bm.id] || {} }))
+      .filter(({ meta }) => meta.scanStatus === 'broken');
+    const alive  = state.flatBookmarks
+      .filter((bm) => state.bookmarkMeta[bm.id]?.scanStatus === 'alive').length;
+
+    if (!allScanned) {
+      // Never been scanned
+      body.appendChild(el('div', { class: 'scan-placeholder' }, [
+        el('div', { class: 'scan-placeholder-icon' }, '🔗'),
+        el('h3', {}, 'No scan results yet'),
+        el('p', {}, `You have ${state.flatBookmarks.length} bookmarks. Click "Scan all bookmarks" above to check for broken links.`),
+      ]));
+    } else if (broken.length === 0) {
+      body.appendChild(el('div', { class: 'scan-placeholder' }, [
+        el('div', { class: 'scan-placeholder-icon' }, '✅'),
+        el('h3', {}, 'All bookmarks are healthy'),
+        el('p', {}, `${alive} bookmark${alive === 1 ? '' : 's'} checked — no broken links found.`),
+      ]));
+    } else {
+      body.appendChild(el('div', { class: 'scan-results-header' }, [
+        el('span', { class: 'scan-broken-count' },
+          `${broken.length} broken bookmark${broken.length === 1 ? '' : 's'}`),
+        el('span', { class: 'scan-alive-count' }, `${alive} healthy`),
+      ]));
+      for (const { bm } of broken) body.appendChild(bookmarkRow(bm));
+    }
   }
 
   panel.appendChild(body);
@@ -1231,17 +1403,23 @@ views.broken = function (root) {
 };
 
 async function runScan() {
-  toast('Scanning bookmarks…', 'info');
-  // Reset progress display; real updates come via setupScanProgressListener()
-  state.scanProgress = { done: 0, total: state.flatBookmarks.length };
+  if (state.scanProgress) {
+    toast('A scan is already running', 'info');
+    return;
+  }
+  // Set progress immediately so the UI flips to scanning mode at once.
+  // The real total comes from the background after it reads the bookmark tree;
+  // we show state.flatBookmarks.length as an initial estimate.
+  state.scanProgress = { done: 0, total: state.flatBookmarks.length || 0 };
   render();
+
   try {
     await send('SCAN_BOOKMARKS');
-    // Background sets scanProgress.running=false when done; listener handles the rest.
-    toast('Scan complete', 'success');
+    // The scan is now running in the background SW.
+    // Progress arrives via setupScanProgressListener → updateScanProgressDOM.
   } catch (e) {
     state.scanProgress = null;
-    toast('Scan failed: ' + e.message, 'error');
+    toast('Could not start scan: ' + e.message, 'error');
     render();
   }
 }
@@ -1319,7 +1497,7 @@ async function importBookmarks(e) {
   const links = doc.querySelectorAll('a');
   let folder;
   try {
-    folder = await send('CREATE_BOOKMARK', { title: `Imported ${new Date().toLocaleDateString()}` });
+    folder = await send('CREATE_BOOKMARK', { title: `Imported ${sessionDefaultName()}` });
   } catch (err) { toast('Import failed: ' + err.message, 'error'); return; }
   let count = 0;
   for (const a of links) {
@@ -1483,10 +1661,11 @@ function iconSvg(d, size = 16) {
 views.reading = function (root) {
   const panel = el('div', { class: 'panel' });
   panel.appendChild(el('div', { class: 'panel-header' }, [
-    el('h2', {}, `Reading List (${state.readingList.length})`),
+    el('h2', {}, `Reading List${state.readingList.length > 0 ? ` (${state.readingList.length})` : ''}`),
     el('div', { class: 'panel-actions' }, [
       state.readingList.length > 0 ? el('button', {
         class: 'btn btn-ghost',
+        title: 'Remove all items from the reading list',
         onclick: async () => {
           const ok = await modalConfirm('Clear reading list?', 'All saved items will be removed.');
           if (!ok) return;
@@ -1496,13 +1675,20 @@ views.reading = function (root) {
       }, 'Clear all') : null,
     ].filter(Boolean)),
   ]));
+  // How-to hint strip
+  panel.appendChild(el('div', { class: 'panel-toolbar' }, [
+    el('span', { style: { fontSize: '11px', color: 'var(--text-faint)' } },
+      '💡 Right-click any page → "Save to Reading List", or click the book icon on a tab row.'),
+  ]));
 
   const body = el('div', { class: 'panel-body' });
   if (state.readingList.length === 0) {
     body.appendChild(emptyState('Reading list is empty',
       'Right-click any page and choose "Save to Reading List", or use the button in the tab row.'));
   } else {
-    for (const item of state.readingList) {
+    const PAGE = 15;
+    const shown = state.readingList.slice(0, (state.readingPage + 1) * PAGE);
+    for (const item of shown) {
       const card = el('div', { class: 'reading-card' });
       const fav  = el('img', { class: 'fav', src: item.favIconUrl || `https://www.google.com/s2/favicons?domain=${getDomain(item.url)}&sz=32`, alt: '' });
       fav.onerror = () => { fav.src = defaultFaviconDataUri(); };
@@ -1521,7 +1707,6 @@ views.reading = function (root) {
           class: 'btn btn-primary',
           onclick: async () => {
             await chrome.tabs.create({ url: item.url });
-            // Auto-remove after opening
             await send('REMOVE_FROM_READING_LIST', { id: item.id });
             await refreshAll(); render();
           },
@@ -1538,6 +1723,14 @@ views.reading = function (root) {
 
       body.appendChild(card);
     }
+    if (state.readingList.length > shown.length) {
+      const remaining = state.readingList.length - shown.length;
+      body.appendChild(el('button', {
+        class: 'btn',
+        style: { width: '100%', marginTop: '8px', justifyContent: 'center' },
+        onclick: () => { state.readingPage++; render(); },
+      }, `Show ${Math.min(PAGE, remaining)} more of ${remaining} remaining…`));
+    }
   }
   panel.appendChild(body);
   root.appendChild(panel);
@@ -1551,19 +1744,20 @@ const WS_COLORS = ['blue','green','purple','red','orange','pink','cyan','amber']
 views.workspaces = function (root) {
   const panel = el('div', { class: 'panel' });
   panel.appendChild(el('div', { class: 'panel-header' }, [
-    el('h2', {}, 'Workspaces'),
-    el('div', { class: 'panel-actions' }, [
-      el('button', {
-        class: 'btn btn-primary',
-        onclick: async () => {
-          const name = await modalPrompt('Workspace name', 'My Workspace');
-          if (!name) return;
-          await send('CREATE_WORKSPACE', { name, color: WS_COLORS[state.workspaces.length % WS_COLORS.length] });
-          toast(`Workspace "${name}" created`, 'success');
-          await refreshAll(); render();
-        },
-      }, '+ New workspace'),
-    ]),
+    el('h2', {}, `Workspaces${state.workspaces.length > 0 ? ` (${state.workspaces.length})` : ''}`),
+  ]));
+  panel.appendChild(el('div', { class: 'panel-toolbar' }, [
+    el('button', {
+      class: 'btn btn-primary',
+      title: 'Save your current tabs as a new named workspace you can launch any time',
+      onclick: async () => {
+        const name = await modalPrompt('Workspace name', 'My Workspace');
+        if (!name) return;
+        await send('CREATE_WORKSPACE', { name, color: WS_COLORS[state.workspaces.length % WS_COLORS.length] });
+        toast(`Workspace "${name}" created`, 'success');
+        await refreshAll(); render();
+      },
+    }, '🗂 Save current tabs as workspace'),
   ]));
 
   const body = el('div', { class: 'panel-body' });
@@ -1639,12 +1833,15 @@ views.insights = async function (root) {
   const panel = el('div', { class: 'panel' });
   panel.appendChild(el('div', { class: 'panel-header' }, [
     el('h2', {}, 'Tab Insights'),
-    el('div', { class: 'panel-actions' }, [
-      el('button', {
-        class: 'btn',
-        onclick: async () => { state.analytics = null; await refreshInsights(root, panel); },
-      }, 'Refresh'),
-    ]),
+  ]));
+  panel.appendChild(el('div', { class: 'panel-toolbar' }, [
+    el('button', {
+      class: 'btn',
+      title: 'Reload analytics from your current open tabs',
+      onclick: async () => { state.analytics = null; await refreshInsights(root, panel); },
+    }, '↻ Refresh'),
+    el('span', { style: { fontSize: '11px', color: 'var(--text-faint)' } },
+      'Overview of your open tabs: age, domains, and idle tabs.'),
   ]));
 
   const body = el('div', { class: 'panel-body' }); body.id = 'insightsBody';
@@ -1781,127 +1978,6 @@ async function refreshInsights(root, panel, body) {
       b.appendChild(row);
     }
   }
-}
-
-// ===========================================================================
-// SMART AUTO-GROUPING (AI)
-// ===========================================================================
-async function runSmartGrouping() {
-  const btn = document.getElementById('smartGroupBtn');
-  if (btn) { btn.textContent = 'Analyzing…'; btn.disabled = true; }
-
-  try {
-    const result = await send('GET_AI_GROUP_SUGGESTIONS');
-
-    if (result.error === 'no_key') {
-      showNoApiKeyModal();
-      return;
-    }
-    if (result.error) {
-      toast('AI error: ' + result.error, 'error');
-      return;
-    }
-    if (!result.suggestions?.length) {
-      toast('No clear groupings found — try having more related tabs open', 'info');
-      return;
-    }
-    showAiGroupModal(result.suggestions);
-  } catch (e) {
-    toast('Smart grouping failed: ' + e.message, 'error');
-  } finally {
-    if (btn) { btn.textContent = 'Smart Group'; btn.disabled = false; }
-  }
-}
-
-function showNoApiKeyModal() {
-  const backdrop = el('div', { class: 'modal-backdrop' });
-  const modal = el('div', { class: 'modal' }, [
-    el('h3', {}, 'Anthropic API key required'),
-    el('p', { style: 'color:var(--text-dim);font-size:12px;margin-top:6px;line-height:1.6' },
-      'Smart Auto-Grouping uses Claude AI to analyse your tabs. Add your API key in Settings to get started.'),
-    el('div', { class: 'modal-actions' }, [
-      el('button', { class: 'btn', onclick: () => backdrop.remove() }, 'Cancel'),
-      el('button', {
-        class: 'btn btn-primary',
-        onclick: () => { backdrop.remove(); chrome.runtime.openOptionsPage(); },
-      }, 'Open Settings'),
-    ]),
-  ]);
-  backdrop.appendChild(modal);
-  backdrop.addEventListener('click', (e) => { if (e.target === backdrop) backdrop.remove(); });
-  document.body.appendChild(backdrop);
-}
-
-function showAiGroupModal(suggestions) {
-  const backdrop = el('div', { class: 'modal-backdrop' });
-
-  // Track which suggestions are selected (all on by default)
-  const selected = new Set(suggestions.map((_, i) => i));
-
-  const buildModal = () => {
-    backdrop.innerHTML = '';
-    const modal = el('div', { class: 'modal ai-group-modal' });
-    modal.appendChild(el('h3', {}, 'Smart grouping suggestions'));
-    modal.appendChild(el('p', { style: 'font-size:12px;color:var(--text-dim);margin:4px 0 14px' },
-      `Claude found ${suggestions.length} group${suggestions.length === 1 ? '' : 's'}. Select which to apply.`));
-
-    const list = el('div', { class: 'ai-group-list' });
-    suggestions.forEach((s, i) => {
-      const isOn = selected.has(i);
-      const card = el('div', {
-        class: 'ai-group-card' + (isOn ? ' selected' : ''),
-        onclick: () => {
-          if (selected.has(i)) selected.delete(i); else selected.add(i);
-          buildModal();
-        },
-      }, [
-        el('div', { class: 'ai-group-card-head' }, [
-          el('span', { class: `ai-group-check ${isOn ? 'on' : ''}` }, isOn ? '✓' : ''),
-          el('span', { class: `group-dot group-${s.color}`, style: 'width:10px;height:10px;border-radius:50%;flex-shrink:0' }),
-          el('span', { class: 'ai-group-name' }, s.name),
-          el('span', { class: 'ai-group-count' }, `${s.tabs.length} tabs`),
-        ]),
-        el('div', { class: 'ai-group-tabs' },
-          s.tabs.map((t) => {
-            const row = el('div', { class: 'ai-tab-row' });
-            const fav = el('img', { src: t.favIconUrl || defaultFaviconDataUri(), alt: '', class: 'fav' });
-            fav.onerror = () => { fav.src = defaultFaviconDataUri(); };
-            row.appendChild(fav);
-            row.appendChild(el('span', { class: 'ai-tab-title' }, t.title || t.url));
-            return row;
-          })
-        ),
-      ]);
-      list.appendChild(card);
-    });
-    modal.appendChild(list);
-
-    const count = selected.size;
-    modal.appendChild(el('div', { class: 'modal-actions' }, [
-      el('button', { class: 'btn', onclick: () => backdrop.remove() }, 'Cancel'),
-      el('button', {
-        class: 'btn btn-primary',
-        disabled: count === 0,
-        onclick: async () => {
-          backdrop.remove();
-          let applied = 0;
-          for (const i of selected) {
-            const s = suggestions[i];
-            const res = await send('APPLY_AI_GROUP', { name: s.name, color: s.color, tabIds: s.tabIds });
-            if (res !== null) applied++;
-          }
-          toast(`Applied ${applied} group${applied === 1 ? '' : 's'}`, 'success');
-          await refreshAll(); render();
-        },
-      }, count === 0 ? 'Select groups to apply' : `Apply ${count} group${count === 1 ? '' : 's'}`),
-    ]));
-
-    backdrop.appendChild(modal);
-  };
-
-  buildModal();
-  backdrop.addEventListener('click', (e) => { if (e.target === backdrop) backdrop.remove(); });
-  document.body.appendChild(backdrop);
 }
 
 init();

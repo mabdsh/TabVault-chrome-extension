@@ -2,7 +2,8 @@
   "manifest_version": 3,
   "name": "TabVault — Tabs & Bookmarks Workspace",
   "version": "1.0.0",
-  "description": "A unified, professional Tab Manager and Bookmark Manager. Sessions, tags, broken-link scanning, tab suspension, and unified search.",
+  "description": "Tab manager, bookmark organiser, session saver & broken-link scanner. Groups, suspender, reading list, workspaces, and AI Smart Grouping.",
+  "minimum_chrome_version": "114",
   "permissions": [
     "tabs",
     "tabGroups",
@@ -13,7 +14,6 @@
     "alarms",
     "contextMenus",
     "sidePanel",
-    "scripting",
     "notifications",
     "sessions"
   ],

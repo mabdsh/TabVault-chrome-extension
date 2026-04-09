@@ -14,7 +14,6 @@ const FIELDS = [
   ['defaultNoteTemplate', 'value'],
   ['scanSchedule', 'value'],
   ['showBookmarkCount', 'checked'],
-  ['anthropicApiKey', 'value'],
 ];
 
 async function load() {
@@ -43,6 +42,7 @@ async function save() {
 }
 
 $('#saveBtn').addEventListener('click', save);
+$('#cancelBtn')?.addEventListener('click', () => load());
 
 $('#exportBtn').addEventListener('click', async () => {
   const data = await send('EXPORT_DATA');

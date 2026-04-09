@@ -35,33 +35,25 @@ const DEFAULT_SETTINGS = {
   defaultNoteTemplate: '',
   scanSchedule: 'never',
   showBookmarkCount: true,
-  // NOTE: anthropicApiKey is intentionally excluded here — it is stored in
-  // chrome.storage.local only (never synced) and never included in exports.
 };
 
 // Settings cache — avoids a storage round-trip on every message/alarm
 let _settingsCache = null;
 chrome.storage.onChanged.addListener((changes, area) => {
-  if (area === 'sync'  && changes.settings)        _settingsCache = null;
-  // When sync quota is exceeded, settings fall back to local storage.
-  // Invalidate the cache for that path too so stale sync data isn't served.
-  if (area === 'local' && changes.settings)        _settingsCache = null;
-  if (area === 'local' && changes.anthropicApiKey) _settingsCache = null;
+  if (area === 'sync'  && changes.settings) _settingsCache = null;
+  if (area === 'local' && changes.settings) _settingsCache = null;
 });
 
 async function getSettings() {
   if (_settingsCache) return _settingsCache;
-  // Load both storage areas in parallel. Local takes precedence when it exists:
-  // it means a previous SET_SETTINGS exceeded sync quota and wrote to local,
-  // making the local copy the most-recently saved version. If local is absent,
-  // sync is the canonical source (the normal case).
-  const [syncSettings, localSettings, anthropicApiKey] = await Promise.all([
+  // Primary: sync storage (shared across devices).
+  // Fallback: local storage (used when sync quota was exceeded on save).
+  const [syncSettings, localSettings] = await Promise.all([
     storage.getSync('settings', null),
     storage.get('settings', null),
-    storage.get('anthropicApiKey', ''),
   ]);
   const s = localSettings ?? syncSettings ?? {};
-  _settingsCache = { ...DEFAULT_SETTINGS, ...s, anthropicApiKey };
+  _settingsCache = { ...DEFAULT_SETTINGS, ...s };
   return _settingsCache;
 }
 
@@ -77,6 +69,7 @@ chrome.runtime.onInstalled.addListener(async (details) => {
   chrome.alarms.create('cleanup-duplicates',      { periodInMinutes: 60 });
   chrome.alarms.create('check-suspended-tabs',    { periodInMinutes: 5 });
   chrome.alarms.create('scheduled-bookmark-scan', { periodInMinutes: 60 * 24 });
+  chrome.alarms.create('cleanup-bookmark-meta',   { periodInMinutes: 60 * 24 * 3 }); // every 3 days
   chrome.alarms.create(RECOVERY_ALARM,            { periodInMinutes: 5 });
 
   // Context menus — removeAll first to be idempotent across updates
@@ -248,6 +241,7 @@ chrome.alarms.onAlarm.addListener(async (alarm) => {
   if (alarm.name === RECOVERY_ALARM)              await saveRecoverySession();
   if (alarm.name === 'check-suspended-tabs')      await runSuspenderCheck();
   if (alarm.name === 'cleanup-duplicates')        await flagDuplicates();
+  if (alarm.name === 'cleanup-bookmark-meta')     await cleanupOrphanedBookmarkMeta();
   if (alarm.name === 'scheduled-bookmark-scan') {
     const s = await getSettings();
     const last = await storage.get('lastScheduledScan', 0);
@@ -263,6 +257,33 @@ chrome.alarms.onAlarm.addListener(async (alarm) => {
     }
   }
 });
+
+// ---------- Orphan metadata cleanup ----------
+// Bookmark metadata keys (bkm_meta_<id>) accumulate when bookmarks are deleted.
+// This runs every 3 days to remove keys whose bookmark IDs no longer exist.
+async function cleanupOrphanedBookmarkMeta() {
+  try {
+    const tree = await chrome.bookmarks.getTree();
+    const liveIds = new Set();
+    function collectIds(nodes) {
+      for (const n of nodes) {
+        if (n.url) liveIds.add(n.id);
+        if (n.children) collectIds(n.children);
+      }
+    }
+    collectIds(tree);
+    const all = await chrome.storage.local.get(null);
+    const orphanKeys = Object.keys(all).filter(
+      (k) => k.startsWith('bkm_meta_') && !liveIds.has(k.slice('bkm_meta_'.length))
+    );
+    if (orphanKeys.length > 0) {
+      await chrome.storage.local.remove(orphanKeys);
+      console.log(`[TabVault] Cleaned up ${orphanKeys.length} orphaned bookmark metadata entries`);
+    }
+  } catch (e) {
+    console.warn('[TabVault] cleanupOrphanedBookmarkMeta failed:', e);
+  }
+}
 
 // ---------- Suspender ----------
 // Implements Chrome's URL match pattern spec:
@@ -400,6 +421,15 @@ const RECOVERY_ALARM      = 'auto-save-recovery';
 // called twice within the same millisecond (e.g. rapid keyboard shortcut).
 let _sessionCounter = 0;
 
+// Produces readable, consistent session names regardless of locale.
+// Example: "Apr 9 at 10:45 AM"
+function sessionDefaultName() {
+  const d = new Date();
+  const date = d.toLocaleDateString('en', { month: 'short', day: 'numeric' });
+  const time = d.toLocaleTimeString('en', { hour: '2-digit', minute: '2-digit' });
+  return `${date} at ${time}`;
+}
+
 async function getAllSessions() {
   return await storage.get('sessions', []);
 }
@@ -425,7 +455,7 @@ async function saveSession(name, tags = []) {
 
   const session = {
     id: `sess_${Date.now()}_${++_sessionCounter}_${Math.random().toString(36).slice(2, 6)}`,
-    name: name || 'Session ' + new Date().toLocaleString(),
+    name: name || sessionDefaultName(),
     createdAt: Date.now(),
     tags,
     tabs: safeTabs.map((t) => ({
@@ -549,87 +579,6 @@ async function exitFocusMode() {
   return true;
 }
 
-// ---------- AI Smart Grouping ----------
-async function getAiGroupSuggestions() {
-  const settings = await getSettings();
-  const apiKey   = settings.anthropicApiKey?.trim();
-  if (!apiKey) return { error: 'no_key' };
-
-  const tabs = await chrome.tabs.query({ currentWindow: true });
-  const safe = tabs.filter(
-    (t) => isSafeUrl(t.url) && !t.url.includes('suspended.html')
-  );
-  if (safe.length < 3) return { suggestions: [] };
-
-  const tabList = safe
-    .map((t) => `id:${t.id} | "${t.title}" | ${t.url}`)
-    .join('\n');
-
-  let res;
-  try {
-    res = await fetch('https://api.anthropic.com/v1/messages', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'x-api-key': apiKey,
-        'anthropic-version': '2023-06-01',
-      },
-      body: JSON.stringify({
-        model: 'claude-haiku-4-5-20251001',
-        max_tokens: 1024,
-        messages: [{
-          role: 'user',
-          content:
-`You are a browser tab organiser. Analyse the tabs below and suggest semantic groups.
-
-TABS:
-${tabList}
-
-Return ONLY a JSON array — no explanation, no markdown fences. Each element:
-  { "name": "2-4 word topic name", "color": "<one of: blue|red|yellow|green|pink|purple|cyan|orange|grey>", "tabIds": [<numeric Chrome tab ids>] }
-
-Rules:
-- Only group 2+ tabs that share a clear topic or task (not just the same domain).
-- Ungrouped or unrelated tabs must be omitted.
-- A tab id may appear in at most one group.
-- If no meaningful groups exist, return [].`,
-        }],
-      }),
-    });
-  } catch (e) {
-    return { error: 'network: ' + e.message };
-  }
-
-  if (!res.ok) {
-    let msg = `HTTP ${res.status}`;
-    try { msg = (await res.json()).error?.message || msg; } catch {}
-    return { error: msg };
-  }
-
-  try {
-    const data = await res.json();
-    const raw  = data.content?.[0]?.text || '[]';
-    const clean = raw.replace(/```json\n?|```/g, '').trim();
-    const suggestions = JSON.parse(clean);
-    // Validate and sanitise each suggestion
-    const valid = suggestions
-      .filter((s) => s.name && Array.isArray(s.tabIds) && s.tabIds.length >= 2)
-      .map((s) => ({
-        name:   String(s.name).slice(0, 40),
-        color:  ['blue','red','yellow','green','pink','purple','cyan','orange','grey'].includes(s.color)
-                  ? s.color : 'blue',
-        tabIds: s.tabIds.map(Number).filter((id) => safe.some((t) => t.id === id)),
-        tabs:   s.tabIds
-                  .map((id) => safe.find((t) => t.id === Number(id)))
-                  .filter(Boolean),
-      }))
-      .filter((s) => s.tabIds.length >= 2);
-    return { suggestions: valid };
-  } catch (e) {
-    return { error: 'parse: ' + e.message };
-  }
-}
-
 // ---------- Bookmark scanning ----------
 // Flag that lets any handler abort an in-progress scan cleanly.
 let _scanAborted = false;
@@ -698,6 +647,11 @@ async function scanAllBookmarks() {
       await storage.set('scanProgress', { done, total: all.length, running: false, aborted: true });
       return results;
     }
+    // MV3 service workers can be killed after ~30 s of idle time. Calling any
+    // Chrome API resets the idle timer, keeping the SW alive for large scans.
+    if (i > 0 && i % 25 === 0) {
+      await chrome.storage.local.get('_swping').catch(() => {});
+    }
     const batch   = all.slice(i, i + BATCH);
     const settled = await Promise.allSettled(batch.map(checkOne));
     for (const r of settled) {
@@ -744,7 +698,7 @@ chrome.contextMenus.onClicked.addListener(async (info, tab) => {
       notify('Saved to Reading List', title);
     }
   } else if (info.menuItemId === 'tabvault-session-save') {
-    const s = await saveSession('Quick session ' + new Date().toLocaleString());
+    const s = await saveSession('Quick save — ' + sessionDefaultName());
     notify('Session saved', s.name);
   } else if (info.menuItemId === 'tabvault-suspend-tab') {
     if (tab) await suspendTab(tab);
@@ -770,7 +724,7 @@ chrome.commands.onCommand.addListener(async (cmd) => {
       if (w) chrome.sidePanel.open({ windowId: w.id });
     } catch (e) { console.warn(e); }
   } else if (cmd === 'save-session') {
-    const s = await saveSession('Session ' + new Date().toLocaleString());
+    const s = await saveSession(sessionDefaultName());
     notify('Session saved', s.name);
   }
 });
@@ -798,22 +752,12 @@ const handlers = {
 
   async GET_SETTINGS() { return await getSettings(); },
   async SET_SETTINGS(payload) {
-    // The API key is local-only — pull it out before touching sync storage.
-    const { anthropicApiKey, ...syncPayload } = payload;
-    if (anthropicApiKey !== undefined) {
-      await storage.set('anthropicApiKey', anthropicApiKey);
-    }
-
     const current = await getSettings();
-    // Build the sync-safe merged object, explicitly excluding the API key.
-    const { anthropicApiKey: _drop, ...currentSync } = current;
-    const merged = { ...currentSync, ...syncPayload };
+    const merged = { ...current, ...payload };
     try {
       await storage.setSync('settings', merged);
     } catch (e) {
-      // chrome.storage.sync has an 8KB-per-item limit. If the user's settings
-      // (e.g. a very long neverSuspendPatterns list) exceed this, fall back to
-      // local storage so the save is never silently dropped.
+      // chrome.storage.sync has an 8KB-per-item limit — fall back to local.
       console.warn('[TabVault] sync storage quota exceeded, falling back to local:', e.message);
       await storage.set('settings', merged);
     }
@@ -868,19 +812,6 @@ const handlers = {
   async GET_FOCUS_STATE()                          { return await storage.get(FOCUS_KEY, { active: false }); },
   async ENTER_FOCUS_MODE({ groupId, groupTitle })  { return await enterFocusMode(groupId, groupTitle); },
   async EXIT_FOCUS_MODE()                          { return await exitFocusMode(); },
-
-  // ── AI Smart Grouping ─────────────────────────────────────
-  async GET_AI_GROUP_SUGGESTIONS()                 { return await getAiGroupSuggestions(); },
-  async APPLY_AI_GROUP({ name, color, tabIds }) {
-    try {
-      const groupId = await chrome.tabs.group({ tabIds });
-      await chrome.tabGroups.update(groupId, { title: name, color });
-      return groupId;
-    } catch (e) {
-      console.warn('[TabVault] APPLY_AI_GROUP failed:', e);
-      return null;
-    }
-  },
 
   async FIND_DUPLICATES() { return await findDuplicates(); },
   async CLOSE_DUPLICATES() { return await closeDuplicates(); },
@@ -1127,14 +1058,24 @@ const handlers = {
     return await suspendTab(t);
   },
 
-  async SCAN_BOOKMARKS() { return await scanAllBookmarks(); },
+  async SCAN_BOOKMARKS() {
+    // Start the scan without awaiting it. The message returns immediately so the
+    // Chrome message channel never times out. Progress and completion are
+    // communicated entirely via chrome.storage (scanProgress key), which the
+    // sidebar watches through setupScanProgressListener().
+    scanAllBookmarks().catch((e) => {
+      console.error('[TabVault] Scan error:', e);
+      storage.set('scanProgress', { done: 0, total: 0, running: false, aborted: false, error: String(e.message) });
+    });
+    return true; // acknowledged — scan is running
+  },
   async ABORT_SCAN() {
     _scanAborted = true;
-    // Mark progress as stopped immediately so the sidebar UI updates at once.
     const current = await storage.get('scanProgress', {});
     await storage.set('scanProgress', { ...current, running: false, aborted: true });
     return true;
   },
+  async CLEANUP_BOOKMARK_META() { return await cleanupOrphanedBookmarkMeta(); },
 
   async GET_BOOKMARK_TREE() { return await chrome.bookmarks.getTree(); },
   async GET_BOOKMARK_META({ id }) { return await storage.get(`bkm_meta_${id}`, {}); },
@@ -1180,11 +1121,7 @@ const handlers = {
   async EXPORT_DATA() {
     const all = await chrome.storage.local.get(null);
     const settings = await getSettings();
-    // Strip the API key — never include it in exports for security.
-    // Users must re-enter it manually on any new device or restore.
-    const { anthropicApiKey: _omitKey, ...safeSettings } = settings;
-    delete all.anthropicApiKey; // also remove from raw local snapshot
-    return { exportedAt: Date.now(), version: 1, local: all, settings: safeSettings };
+    return { exportedAt: Date.now(), version: 1, local: all, settings };
   },
   async IMPORT_DATA({ data }) {
     if (!data || typeof data !== 'object') throw new Error('Invalid import: not an object');
@@ -1212,8 +1149,6 @@ const handlers = {
 
     if (data.settings && typeof data.settings === 'object') {
       // Merge with defaults so unknown/malformed keys are dropped.
-      // anthropicApiKey is intentionally excluded — it is local-only and
-      // should never be restored from an export file on a different device.
       const safeSettings = {};
       for (const key of Object.keys(DEFAULT_SETTINGS)) {
         if (key in data.settings) safeSettings[key] = data.settings[key];

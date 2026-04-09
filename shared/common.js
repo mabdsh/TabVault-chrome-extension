@@ -170,6 +170,27 @@ export function showUndoToast(message, undoFn, duration = 5000) {
 
   timer = setTimeout(dismiss, duration);
 }
+// Trap keyboard focus inside a modal element so Tab/Shift+Tab cycle within it.
+function trapFocus(modal) {
+  const SELECTOR = 'button:not([disabled]), input:not([disabled]), textarea:not([disabled]), select:not([disabled]), a[href], [tabindex]:not([tabindex="-1"])';
+  modal.addEventListener('keydown', (e) => {
+    if (e.key !== 'Tab') return;
+    const focusable = [...modal.querySelectorAll(SELECTOR)].filter((el) => el.offsetParent !== null);
+    if (focusable.length === 0) { e.preventDefault(); return; }
+    const first = focusable[0];
+    const last  = focusable[focusable.length - 1];
+    if (e.shiftKey) {
+      if (document.activeElement === first || !modal.contains(document.activeElement)) {
+        last.focus(); e.preventDefault();
+      }
+    } else {
+      if (document.activeElement === last || !modal.contains(document.activeElement)) {
+        first.focus(); e.preventDefault();
+      }
+    }
+  });
+}
+
 export function modalPrompt(title, defaultValue = '', placeholder = '') {
   return new Promise((resolve) => {
     const backdrop = el('div', { class: 'modal-backdrop' });
@@ -184,9 +205,10 @@ export function modalPrompt(title, defaultValue = '', placeholder = '') {
     backdrop.appendChild(modal);
     backdrop.addEventListener('click', (e) => { if (e.target === backdrop) { backdrop.remove(); resolve(null); } });
     document.body.appendChild(backdrop);
+    trapFocus(modal);
     setTimeout(() => input.focus(), 50);
     input.addEventListener('keydown', (e) => {
-      if (e.key === 'Enter') { backdrop.remove(); resolve(input.value); }
+      if (e.key === 'Enter')  { backdrop.remove(); resolve(input.value); }
       if (e.key === 'Escape') { backdrop.remove(); resolve(null); }
     });
   });
@@ -203,7 +225,11 @@ export function modalConfirm(title, message) {
       el('div', { class: 'modal-actions' }, [cancel, ok]),
     ]);
     backdrop.appendChild(modal);
+    backdrop.addEventListener('click', (e) => { if (e.target === backdrop) { backdrop.remove(); resolve(false); } });
+    backdrop.addEventListener('keydown', (e) => { if (e.key === 'Escape') { backdrop.remove(); resolve(false); } });
     document.body.appendChild(backdrop);
+    trapFocus(modal);
+    setTimeout(() => ok.focus(), 50);
   });
 }
 

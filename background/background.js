@@ -19,8 +19,11 @@ const storage = {
   },
 };
 
+// Maximum number of saved sessions kept (oldest are pruned beyond this cap)
+const MAX_SESSIONS = 50;
+
 const DEFAULT_SETTINGS = {
-  defaultView: 'tabs',           // tabs | bookmarks | last
+  defaultView: 'tabs',
   showToolbarButton: true,
   openOnStart: false,
   suspenderEnabled: true,
@@ -30,23 +33,35 @@ const DEFAULT_SETTINGS = {
   showTabBadge: true,
   autoTagBookmarks: false,
   defaultNoteTemplate: '',
-  scanSchedule: 'never',         // never | weekly | monthly
+  scanSchedule: 'never',
   showBookmarkCount: true,
+  // NOTE: anthropicApiKey is intentionally excluded here — it is stored in
+  // chrome.storage.local only (never synced) and never included in exports.
 };
 
-// Settings cache — avoids a storage.sync round-trip on every message/alarm
+// Settings cache — avoids a storage round-trip on every message/alarm
 let _settingsCache = null;
 chrome.storage.onChanged.addListener((changes, area) => {
-  if (area === 'sync' && changes.settings) _settingsCache = null;
+  if (area === 'sync'  && changes.settings)        _settingsCache = null;
+  // When sync quota is exceeded, settings fall back to local storage.
+  // Invalidate the cache for that path too so stale sync data isn't served.
+  if (area === 'local' && changes.settings)        _settingsCache = null;
+  if (area === 'local' && changes.anthropicApiKey) _settingsCache = null;
 });
 
 async function getSettings() {
   if (_settingsCache) return _settingsCache;
-  // Primary: sync storage (shared across devices).
-  // Fallback: local storage (used when sync quota was exceeded on save).
-  let s = await storage.getSync('settings', null);
-  if (!s) s = await storage.get('settings', {});
-  _settingsCache = { ...DEFAULT_SETTINGS, ...s };
+  // Load both storage areas in parallel. Local takes precedence when it exists:
+  // it means a previous SET_SETTINGS exceeded sync quota and wrote to local,
+  // making the local copy the most-recently saved version. If local is absent,
+  // sync is the canonical source (the normal case).
+  const [syncSettings, localSettings, anthropicApiKey] = await Promise.all([
+    storage.getSync('settings', null),
+    storage.get('settings', null),
+    storage.get('anthropicApiKey', ''),
+  ]);
+  const s = localSettings ?? syncSettings ?? {};
+  _settingsCache = { ...DEFAULT_SETTINGS, ...s, anthropicApiKey };
   return _settingsCache;
 }
 
@@ -381,6 +396,10 @@ function isSafeUrl(url) {
 const RECOVERY_SESSION_ID = '__tabvault_recovery__';
 const RECOVERY_ALARM      = 'auto-save-recovery';
 
+// Monotonic counter — guarantees unique session IDs even if saveSession() is
+// called twice within the same millisecond (e.g. rapid keyboard shortcut).
+let _sessionCounter = 0;
+
 async function getAllSessions() {
   return await storage.get('sessions', []);
 }
@@ -405,7 +424,7 @@ async function saveSession(name, tags = []) {
     .filter(Boolean);
 
   const session = {
-    id: 'sess_' + Date.now() + '_' + Math.random().toString(36).slice(2, 8),
+    id: `sess_${Date.now()}_${++_sessionCounter}_${Math.random().toString(36).slice(2, 6)}`,
     name: name || 'Session ' + new Date().toLocaleString(),
     createdAt: Date.now(),
     tags,
@@ -482,24 +501,157 @@ async function autoGroupByDomain() {
   return created;
 }
 
+// ---------- Focus Mode ----------
+const FOCUS_KEY = 'focusState';
+
+async function enterFocusMode(groupId, groupTitle) {
+  const tabs = await chrome.tabs.query({ currentWindow: true });
+  const toSuspend = tabs.filter(
+    (t) => t.groupId !== groupId &&
+           !t.pinned &&
+           !t.url?.includes('suspended.html') &&
+           isSafeUrl(t.url)
+  );
+  const suspendedByFocusIds = [];
+  for (const t of toSuspend) {
+    try {
+      await suspendTab(t);
+      suspendedByFocusIds.push(t.id);
+    } catch {}
+  }
+  const focusState = {
+    active: true,
+    groupId,
+    groupTitle: groupTitle || 'Focus Group',
+    startTime: Date.now(),
+    suspendedByFocusIds,
+  };
+  await storage.set(FOCUS_KEY, focusState);
+  return focusState;
+}
+
+async function exitFocusMode() {
+  const focus = await storage.get(FOCUS_KEY, null);
+  if (!focus?.active) return false;
+  // Restore every tab that was suspended by this focus session
+  const tabs = await chrome.tabs.query({ currentWindow: true });
+  for (const tabId of focus.suspendedByFocusIds) {
+    const tab = tabs.find((t) => t.id === tabId);
+    if (tab?.url?.includes('suspended.html')) {
+      try {
+        const params = new URLSearchParams(new URL(tab.url).search);
+        const orig = params.get('url');
+        if (orig && isSafeUrl(orig)) await chrome.tabs.update(tabId, { url: orig });
+      } catch {}
+    }
+  }
+  await storage.set(FOCUS_KEY, { active: false });
+  return true;
+}
+
+// ---------- AI Smart Grouping ----------
+async function getAiGroupSuggestions() {
+  const settings = await getSettings();
+  const apiKey   = settings.anthropicApiKey?.trim();
+  if (!apiKey) return { error: 'no_key' };
+
+  const tabs = await chrome.tabs.query({ currentWindow: true });
+  const safe = tabs.filter(
+    (t) => isSafeUrl(t.url) && !t.url.includes('suspended.html')
+  );
+  if (safe.length < 3) return { suggestions: [] };
+
+  const tabList = safe
+    .map((t) => `id:${t.id} | "${t.title}" | ${t.url}`)
+    .join('\n');
+
+  let res;
+  try {
+    res = await fetch('https://api.anthropic.com/v1/messages', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-api-key': apiKey,
+        'anthropic-version': '2023-06-01',
+      },
+      body: JSON.stringify({
+        model: 'claude-haiku-4-5-20251001',
+        max_tokens: 1024,
+        messages: [{
+          role: 'user',
+          content:
+`You are a browser tab organiser. Analyse the tabs below and suggest semantic groups.
+
+TABS:
+${tabList}
+
+Return ONLY a JSON array — no explanation, no markdown fences. Each element:
+  { "name": "2-4 word topic name", "color": "<one of: blue|red|yellow|green|pink|purple|cyan|orange|grey>", "tabIds": [<numeric Chrome tab ids>] }
+
+Rules:
+- Only group 2+ tabs that share a clear topic or task (not just the same domain).
+- Ungrouped or unrelated tabs must be omitted.
+- A tab id may appear in at most one group.
+- If no meaningful groups exist, return [].`,
+        }],
+      }),
+    });
+  } catch (e) {
+    return { error: 'network: ' + e.message };
+  }
+
+  if (!res.ok) {
+    let msg = `HTTP ${res.status}`;
+    try { msg = (await res.json()).error?.message || msg; } catch {}
+    return { error: msg };
+  }
+
+  try {
+    const data = await res.json();
+    const raw  = data.content?.[0]?.text || '[]';
+    const clean = raw.replace(/```json\n?|```/g, '').trim();
+    const suggestions = JSON.parse(clean);
+    // Validate and sanitise each suggestion
+    const valid = suggestions
+      .filter((s) => s.name && Array.isArray(s.tabIds) && s.tabIds.length >= 2)
+      .map((s) => ({
+        name:   String(s.name).slice(0, 40),
+        color:  ['blue','red','yellow','green','pink','purple','cyan','orange','grey'].includes(s.color)
+                  ? s.color : 'blue',
+        tabIds: s.tabIds.map(Number).filter((id) => safe.some((t) => t.id === id)),
+        tabs:   s.tabIds
+                  .map((id) => safe.find((t) => t.id === Number(id)))
+                  .filter(Boolean),
+      }))
+      .filter((s) => s.tabIds.length >= 2);
+    return { suggestions: valid };
+  } catch (e) {
+    return { error: 'parse: ' + e.message };
+  }
+}
+
 // ---------- Bookmark scanning ----------
-async function flattenBookmarks(nodes, out = []) {
+// Flag that lets any handler abort an in-progress scan cleanly.
+let _scanAborted = false;
+
+function flattenBookmarks(nodes, out = []) {
   for (const n of nodes) {
     if (n.url) out.push(n);
-    if (n.children) await flattenBookmarks(n.children, out);
+    if (n.children) flattenBookmarks(n.children, out);
   }
   return out;
 }
 
-async function scanAllBookmarks(progressCb) {
+async function scanAllBookmarks() {
+  _scanAborted = false;
   const tree = await chrome.bookmarks.getTree();
-  const all  = await flattenBookmarks(tree);
+  const all  = flattenBookmarks(tree);
   let done   = 0;
   const results = [];
-  const BATCH  = 5;                 // concurrent requests per batch
-  const DELAY  = 300;              // ms between batches — avoids hammering servers
+  const BATCH  = 5;    // concurrent requests per batch
+  const DELAY  = 300;  // ms between batches — avoids hammering servers
 
-  await storage.set('scanProgress', { done: 0, total: all.length, running: true });
+  await storage.set('scanProgress', { done: 0, total: all.length, running: true, aborted: false });
 
   async function checkOne(bm) {
     let status = 'unknown';
@@ -511,12 +663,20 @@ async function scanAllBookmarks(progressCb) {
       let res = await fetch(bm.url, { method: 'HEAD', signal: ctrl.signal });
       clearTimeout(timeout);
       if (res.status === 405) {
-        // Server doesn't support HEAD — retry with a minimal GET
-        res = await fetch(bm.url, {
-          method: 'GET',
-          headers: { Range: 'bytes=0-0' },
-          signal: ctrl.signal,
-        });
+        // Server doesn't support HEAD — retry with a minimal GET using a fresh
+        // controller. The original timeout was cancelled above; without a new one
+        // the GET could hang indefinitely.
+        const retryCtrl    = new AbortController();
+        const retryTimeout = setTimeout(() => retryCtrl.abort(), 8000);
+        try {
+          res = await fetch(bm.url, {
+            method: 'GET',
+            headers: { Range: 'bytes=0-0' },
+            signal: retryCtrl.signal,
+          });
+        } finally {
+          clearTimeout(retryTimeout);
+        }
       }
       if (res.ok || res.status === 206)  status = 'alive';
       else if (res.status >= 400)        status = 'broken';
@@ -532,21 +692,24 @@ async function scanAllBookmarks(progressCb) {
     return { id: bm.id, url: bm.url, title: bm.title, status };
   }
 
-  // Process in batches of BATCH with a short pause between each
+  // Process in batches, checking for cancellation before each one.
   for (let i = 0; i < all.length; i += BATCH) {
+    if (_scanAborted) {
+      await storage.set('scanProgress', { done, total: all.length, running: false, aborted: true });
+      return results;
+    }
     const batch   = all.slice(i, i + BATCH);
     const settled = await Promise.allSettled(batch.map(checkOne));
     for (const r of settled) {
       if (r.status === 'fulfilled') results.push(r.value);
       done++;
     }
-    await storage.set('scanProgress', { done, total: all.length, running: true });
-    if (progressCb) progressCb(done, all.length);
+    await storage.set('scanProgress', { done, total: all.length, running: true, aborted: false });
     // Brief pause between batches to be polite to remote servers
     if (i + BATCH < all.length) await new Promise((r) => setTimeout(r, DELAY));
   }
 
-  await storage.set('scanProgress', { done, total: all.length, running: false });
+  await storage.set('scanProgress', { done, total: all.length, running: false, aborted: false });
   return results;
 }
 
@@ -554,7 +717,16 @@ async function scanAllBookmarks(progressCb) {
 chrome.contextMenus.onClicked.addListener(async (info, tab) => {
   if (info.menuItemId === 'tabvault-bookmark') {
     const url = info.linkUrl || tab.url;
-    const title = info.linkUrl ? info.linkUrl : tab.title;
+    // When saving a link: prefer the selected anchor text; fall back to the
+    // hostname so the bookmark has a human-readable name instead of a raw URL.
+    let title;
+    if (info.linkUrl) {
+      title = info.selectionText?.trim() || (() => {
+        try { return new URL(info.linkUrl).hostname; } catch { return info.linkUrl; }
+      })();
+    } else {
+      title = tab.title;
+    }
     try {
       await chrome.bookmarks.create({ title, url });
       notify('Bookmark saved', title);
@@ -626,7 +798,16 @@ const handlers = {
 
   async GET_SETTINGS() { return await getSettings(); },
   async SET_SETTINGS(payload) {
-    const merged = { ...(await getSettings()), ...payload };
+    // The API key is local-only — pull it out before touching sync storage.
+    const { anthropicApiKey, ...syncPayload } = payload;
+    if (anthropicApiKey !== undefined) {
+      await storage.set('anthropicApiKey', anthropicApiKey);
+    }
+
+    const current = await getSettings();
+    // Build the sync-safe merged object, explicitly excluding the API key.
+    const { anthropicApiKey: _drop, ...currentSync } = current;
+    const merged = { ...currentSync, ...syncPayload };
     try {
       await storage.setSync('settings', merged);
     } catch (e) {
@@ -682,6 +863,24 @@ const handlers = {
     return groupId;
   },
   async AUTO_GROUP_TABS() { return await autoGroupByDomain(); },
+
+  // ── Focus Mode ────────────────────────────────────────────
+  async GET_FOCUS_STATE()                          { return await storage.get(FOCUS_KEY, { active: false }); },
+  async ENTER_FOCUS_MODE({ groupId, groupTitle })  { return await enterFocusMode(groupId, groupTitle); },
+  async EXIT_FOCUS_MODE()                          { return await exitFocusMode(); },
+
+  // ── AI Smart Grouping ─────────────────────────────────────
+  async GET_AI_GROUP_SUGGESTIONS()                 { return await getAiGroupSuggestions(); },
+  async APPLY_AI_GROUP({ name, color, tabIds }) {
+    try {
+      const groupId = await chrome.tabs.group({ tabIds });
+      await chrome.tabGroups.update(groupId, { title: name, color });
+      return groupId;
+    } catch (e) {
+      console.warn('[TabVault] APPLY_AI_GROUP failed:', e);
+      return null;
+    }
+  },
 
   async FIND_DUPLICATES() { return await findDuplicates(); },
   async CLOSE_DUPLICATES() { return await closeDuplicates(); },
@@ -929,6 +1128,13 @@ const handlers = {
   },
 
   async SCAN_BOOKMARKS() { return await scanAllBookmarks(); },
+  async ABORT_SCAN() {
+    _scanAborted = true;
+    // Mark progress as stopped immediately so the sidebar UI updates at once.
+    const current = await storage.get('scanProgress', {});
+    await storage.set('scanProgress', { ...current, running: false, aborted: true });
+    return true;
+  },
 
   async GET_BOOKMARK_TREE() { return await chrome.bookmarks.getTree(); },
   async GET_BOOKMARK_META({ id }) { return await storage.get(`bkm_meta_${id}`, {}); },
@@ -974,7 +1180,11 @@ const handlers = {
   async EXPORT_DATA() {
     const all = await chrome.storage.local.get(null);
     const settings = await getSettings();
-    return { exportedAt: Date.now(), version: 1, local: all, settings };
+    // Strip the API key — never include it in exports for security.
+    // Users must re-enter it manually on any new device or restore.
+    const { anthropicApiKey: _omitKey, ...safeSettings } = settings;
+    delete all.anthropicApiKey; // also remove from raw local snapshot
+    return { exportedAt: Date.now(), version: 1, local: all, settings: safeSettings };
   },
   async IMPORT_DATA({ data }) {
     if (!data || typeof data !== 'object') throw new Error('Invalid import: not an object');
@@ -1001,7 +1211,9 @@ const handlers = {
     }
 
     if (data.settings && typeof data.settings === 'object') {
-      // Merge with defaults so unknown/malformed keys are dropped
+      // Merge with defaults so unknown/malformed keys are dropped.
+      // anthropicApiKey is intentionally excluded — it is local-only and
+      // should never be restored from an export file on a different device.
       const safeSettings = {};
       for (const key of Object.keys(DEFAULT_SETTINGS)) {
         if (key in data.settings) safeSettings[key] = data.settings[key];

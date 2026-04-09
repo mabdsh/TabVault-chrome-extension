@@ -1,7 +1,7 @@
 // popup.js — TabVault popup with sub-tabs (Tabs / Sessions / Bookmarks)
 import {
   send, $, $$, el, debounce, getDomain, favicon, defaultFaviconDataUri,
-  formatDate, formatAge, ageClass, toast, modalPrompt, modalConfirm,
+  formatDate, formatAge, ageClass, toast, modalPrompt, modalConfirm, flatten,
 } from '../shared/common.js';
 
 const state = {
@@ -54,13 +54,6 @@ async function loadAll() {
   } catch (e) {
     console.error('[TabVault popup] load failed:', e);
     toast('Failed to load', 'error');
-  }
-}
-
-function flatten(nodes, out) {
-  for (const n of nodes) {
-    if (n.url) out.push(n);
-    if (n.children) flatten(n.children, out);
   }
 }
 
@@ -227,6 +220,7 @@ function tabRow(tab) {
   const actions = el('div', { class: 'actions' });
   const pinBtn = el('button', {
     title: tab.pinned ? 'Unpin' : 'Pin',
+    'aria-label': tab.pinned ? 'Unpin tab' : 'Pin tab',
     onclick: async (e) => {
       e.stopPropagation();
       await send('PIN_TAB', { tabId: tab.id, pinned: !tab.pinned });
@@ -236,6 +230,7 @@ function tabRow(tab) {
 
   const suspendBtn = el('button', {
     title: 'Suspend',
+    'aria-label': 'Suspend tab',
     onclick: async (e) => {
       e.stopPropagation();
       await send('SUSPEND_TAB', { tabId: tab.id });
@@ -248,6 +243,7 @@ function tabRow(tab) {
   if (isPlaying || isMuted) {
     const muteBtn = el('button', {
       title: isMuted ? 'Unmute' : 'Mute',
+      'aria-label': isMuted ? 'Unmute tab' : 'Mute tab',
       onclick: async (e) => {
         e.stopPropagation();
         await send('TOGGLE_MUTE_TAB', { tabId: tab.id, muted: !isMuted });
@@ -261,6 +257,7 @@ function tabRow(tab) {
     const closeBtn = el('button', {
       class: 'danger',
       title: 'Close',
+      'aria-label': `Close tab: ${tab.title || 'untitled'}`,
       onclick: async (e) => {
         e.stopPropagation();
         await send('CLOSE_TAB', { tabId: tab.id });
@@ -441,11 +438,13 @@ function bookmarkRow(bm) {
   actions.append(
     el('button', {
       title: 'Copy link',
+      'aria-label': 'Copy link',
       onclick: (e) => { e.stopPropagation(); navigator.clipboard.writeText(bm.url); toast('Copied', 'success'); },
     }, '📋'),
     el('button', {
       class: 'danger',
       title: 'Delete',
+      'aria-label': `Delete bookmark: ${bm.title || bm.url}`,
       onclick: async (e) => {
         e.stopPropagation();
         const ok = await modalConfirm('Delete bookmark?', bm.title);
@@ -551,6 +550,7 @@ function renderReadingList(body) {
     const actions = el('div', { class: 'actions' });
     actions.appendChild(el('button', {
       title: 'Remove from list',
+      'aria-label': `Remove from reading list: ${item.title || item.url}`,
       class: 'danger',
       onclick: async (e) => {
         e.stopPropagation();
@@ -560,8 +560,10 @@ function renderReadingList(body) {
     }, '✕'));
     card.appendChild(actions);
     card.addEventListener('click', async () => {
+      // Open the page without auto-removing — the user may want to come back
+      // to it. They can remove it explicitly with the ✕ button, or mark it
+      // read via the dedicated action below.
       await chrome.tabs.create({ url: item.url });
-      await send('REMOVE_FROM_READING_LIST', { id: item.id });
       window.close();
     });
     body.appendChild(card);

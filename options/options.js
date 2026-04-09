@@ -14,6 +14,7 @@ const FIELDS = [
   ['defaultNoteTemplate', 'value'],
   ['scanSchedule', 'value'],
   ['showBookmarkCount', 'checked'],
+  ['anthropicApiKey', 'value'],
 ];
 
 async function load() {

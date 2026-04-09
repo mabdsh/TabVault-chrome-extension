@@ -2,7 +2,7 @@
 import {
   send, $, $$, el, debounce, getDomain, favicon, defaultFaviconDataUri,
   formatDate, formatAge, ageClass, escapeHtml, tagColor,
-  toast, showUndoToast, modalPrompt, modalConfirm,
+  toast, showUndoToast, modalPrompt, modalConfirm, flatten,
 } from '../shared/common.js';
 
 const state = {
@@ -18,6 +18,7 @@ const state = {
   workspaces: [],
   domainSummary: [],
   analytics: null,
+  focusMode: { active: false },  // Focus Mode state
   sessions: [],
   bookmarkTree: [],
   bookmarkMeta: {},
@@ -71,6 +72,24 @@ function setView(name) {
   state.view = name;
   $$('.nav-item').forEach((b) => b.classList.toggle('active', b.dataset.view === name));
   render();
+}
+
+// ----- Focus Mode timer -----
+let _focusTimerInterval = null;
+function startFocusTimer() {
+  if (_focusTimerInterval) return; // already running
+  _focusTimerInterval = setInterval(() => {
+    const el = document.getElementById('focusTimerDisplay');
+    if (!el || !state.focusMode?.active) {
+      clearInterval(_focusTimerInterval);
+      _focusTimerInterval = null;
+      return;
+    }
+    const ms   = Date.now() - state.focusMode.startTime;
+    const mins = Math.floor(ms / 60000);
+    const secs = Math.floor((ms % 60000) / 1000);
+    el.textContent = `${mins}:${secs.toString().padStart(2, '0')}`;
+  }, 1000);
 }
 
 document.addEventListener('click', (e) => {
@@ -163,7 +182,7 @@ function setupScanProgressListener() {
 
 async function refreshAll() {
   try {
-    const [tabsData, sessions, tree, meta, dups, recent, locked, reading, workspaces, domainSummary] = await Promise.all([
+    const [tabsData, sessions, tree, meta, dups, recent, locked, reading, workspaces, domainSummary, focusState] = await Promise.all([
       send('GET_ALL_TABS', { windowId: state.windowFilter }),
       send('GET_ALL_SESSIONS'),
       send('GET_BOOKMARK_TREE'),
@@ -174,6 +193,7 @@ async function refreshAll() {
       send('GET_READING_LIST'),
       send('GET_WORKSPACES'),
       send('GET_DOMAIN_SUMMARY'),
+      send('GET_FOCUS_STATE'),
     ]);
     state.tabs           = tabsData.tabs    || [];
     state.groups         = tabsData.groups  || [];
@@ -187,9 +207,63 @@ async function refreshAll() {
     state.readingList    = reading          || [];
     state.workspaces     = workspaces       || [];
     state.domainSummary  = domainSummary    || [];
+    state.focusMode      = focusState       || { active: false };
     state.flatBookmarks  = [];
     flatten(state.bookmarkTree, state.flatBookmarks);
+    if (state.focusMode.active) startFocusTimer();
+    updateNavBadges();
+  } catch (e) {
+    console.error('[TabVault] refresh failed:', e);
+    toast('Failed to load data', 'error');
+  }
+}
 
+// Lightweight refresh — only fetches tab-related data. Called on every tab
+// event (activate, create, remove, update, move, group changes). Avoids
+// hammering the background with bookmark/session/workspace messages that
+// haven't changed just because the user switched tabs.
+async function refreshTabs() {
+  try {
+    const [tabsData, dups, recent, domainSummary, focusState] = await Promise.all([
+      send('GET_ALL_TABS', { windowId: state.windowFilter }),
+      send('FIND_DUPLICATES'),
+      send('GET_RECENT_TABS'),
+      send('GET_DOMAIN_SUMMARY'),
+      send('GET_FOCUS_STATE'),
+    ]);
+    state.tabs          = tabsData.tabs    || [];
+    state.groups        = tabsData.groups  || [];
+    state.windows       = tabsData.windows || [];
+    state.duplicates    = dups             || [];
+    state.recentTabs    = recent           || [];
+    state.domainSummary = domainSummary    || [];
+    state.focusMode     = focusState       || { active: false };
+    if (state.focusMode.active) startFocusTimer();
+    updateNavBadges();
+  } catch (e) {
+    console.error('[TabVault] tab refresh failed:', e);
+  }
+}
+
+// Bookmark-only refresh — called when chrome.bookmarks events fire. Only
+// re-fetches the tree and metadata; leaves tabs, sessions, etc. untouched.
+async function refreshBookmarks() {
+  try {
+    const [tree, meta] = await Promise.all([
+      send('GET_BOOKMARK_TREE'),
+      send('GET_ALL_BOOKMARK_META'),
+    ]);
+    state.bookmarkTree  = tree || [];
+    state.bookmarkMeta  = meta || {};
+    state.flatBookmarks = [];
+    flatten(state.bookmarkTree, state.flatBookmarks);
+  } catch (e) {
+    console.error('[TabVault] bookmark refresh failed:', e);
+  }
+}
+
+// Update the nav sidebar badges without triggering a full data fetch.
+function updateNavBadges() {
     $('#navTabCount').textContent  = state.tabs.length;
     $('#navSessionCount').textContent = state.sessions.length;
 
@@ -205,47 +279,43 @@ async function refreshAll() {
     const wsBadge = $('#navWsCount');
     if (state.workspaces.length > 0) { wsBadge.hidden = false; wsBadge.textContent = state.workspaces.length; }
     else wsBadge.hidden = true;
-
-  } catch (e) {
-    console.error('[TabVault] refresh failed:', e);
-    toast('Failed to load data', 'error');
-  }
-}
-
-function flatten(nodes, out) {
-  for (const n of nodes) {
-    if (n.url) out.push(n);
-    if (n.children) flatten(n.children, out);
-  }
 }
 
 // ----- Tab listeners (live updates) -----
 function setupTabListeners() {
-  // Only rebuild on meaningful state changes to avoid flicker on every keypress.
-  // onUpdated fires on every URL character typed — filter to 'complete' only.
-  const refresh = debounce(async () => {
-    await refreshAll();
-    // render() clears #main before redrawing — do NOT call views[x](main) directly
-    // as that appends onto existing content and causes DOM doubling.
+  // Tab events → lightweight tab-only refresh. The debounce absorbs bursts
+  // (e.g. restoring a session opens many tabs rapidly).
+  const refreshTabsDebounced = debounce(async () => {
+    await refreshTabs();
     if (!state.searchQuery) render();
   }, 150);
-  chrome.tabs.onCreated.addListener(refresh);
-  chrome.tabs.onRemoved.addListener(refresh);
+
+  // Bookmark events → bookmark-only refresh. Longer debounce — bookmark
+  // changes are typically user-driven and less time-critical than tab switches.
+  const refreshBookmarksDebounced = debounce(async () => {
+    await refreshBookmarks();
+    // Only re-render if the user is currently viewing a bookmark-related view.
+    const bmViews = new Set(['bookmarks', 'tags', 'broken']);
+    if (!state.searchQuery && bmViews.has(state.view)) render();
+  }, 400);
+
+  chrome.tabs.onCreated.addListener(refreshTabsDebounced);
+  chrome.tabs.onRemoved.addListener(refreshTabsDebounced);
   chrome.tabs.onUpdated.addListener((_id, info) => {
     // Only refresh on meaningful changes; 'loading' fires on every URL keystroke
-    if (info.status === 'complete' || info.title || info.pinned !== undefined) refresh();
+    if (info.status === 'complete' || info.title || info.pinned !== undefined) refreshTabsDebounced();
   });
-  chrome.tabs.onMoved.addListener(refresh);
-  chrome.tabs.onActivated.addListener(refresh);
+  chrome.tabs.onMoved.addListener(refreshTabsDebounced);
+  chrome.tabs.onActivated.addListener(refreshTabsDebounced);
   try {
-    chrome.tabGroups.onCreated.addListener(refresh);
-    chrome.tabGroups.onUpdated.addListener(refresh);
-    chrome.tabGroups.onRemoved.addListener(refresh);
+    chrome.tabGroups.onCreated.addListener(refreshTabsDebounced);
+    chrome.tabGroups.onUpdated.addListener(refreshTabsDebounced);
+    chrome.tabGroups.onRemoved.addListener(refreshTabsDebounced);
   } catch {}
-  chrome.bookmarks.onCreated.addListener(refresh);
-  chrome.bookmarks.onRemoved.addListener(refresh);
-  chrome.bookmarks.onChanged.addListener(refresh);
-  chrome.bookmarks.onMoved.addListener(refresh);
+  chrome.bookmarks.onCreated.addListener(refreshBookmarksDebounced);
+  chrome.bookmarks.onRemoved.addListener(refreshBookmarksDebounced);
+  chrome.bookmarks.onChanged.addListener(refreshBookmarksDebounced);
+  chrome.bookmarks.onMoved.addListener(refreshBookmarksDebounced);
 }
 
 // ===========================================================================
@@ -294,14 +364,29 @@ views.tabs = function (root) {
       state.selectionMode ? el('button', {
         class: 'btn btn-danger',
         title: 'Close selected',
+        'aria-label': 'Close selected tabs',
         onclick: async () => {
           if (state.selectedTabIds.size === 0) return;
-          for (const id of state.selectedTabIds) {
-            try { await send('CLOSE_TAB', { tabId: id }); } catch {}
+          // Snapshot tab info before closing so the undo toast can restore them.
+          const toClose = state.tabs.filter((t) => state.selectedTabIds.has(t.id));
+          const snapshots = toClose.map((t) => ({ url: t.url, title: t.title, pinned: t.pinned }));
+          for (const t of toClose) {
+            try { await send('CLOSE_TAB', { tabId: t.id }); } catch {}
           }
           state.selectedTabIds.clear();
-          await refreshAll();
+          state.selectionMode = false;
+          await refreshTabs();
           render();
+          const count = snapshots.length;
+          showUndoToast(
+            `Closed ${count} tab${count === 1 ? '' : 's'}`,
+            async () => {
+              for (const s of snapshots) {
+                try { await send('OPEN_URL', { url: s.url, pinned: s.pinned }); } catch {}
+              }
+              await refreshTabs(); render();
+            },
+          );
         },
       }, 'Close') : null,
       !state.selectionMode ? el('button', {
@@ -314,6 +399,22 @@ views.tabs = function (root) {
           render();
         },
       }, 'Auto-group') : null,
+      // Smart Auto-Grouping (AI)
+      !state.selectionMode ? el('button', {
+        class: 'btn btn-smart-group',
+        id: 'smartGroupBtn',
+        title: 'Use AI to group tabs by topic',
+        onclick: () => runSmartGrouping(),
+      }, [
+        (() => {
+          const ns = 'http://www.w3.org/2000/svg';
+          const s  = document.createElementNS(ns, 'svg');
+          s.setAttribute('class', 'icon'); s.setAttribute('viewBox', '0 0 24 24');
+          s.innerHTML = '<path d="M12 2a5 5 0 015 5v3h1a2 2 0 012 2v7a2 2 0 01-2 2H6a2 2 0 01-2-2v-7a2 2 0 012-2h1V7a5 5 0 015-5z"/><circle cx="12" cy="16" r="1.5"/>';
+          return s;
+        })(),
+        'Smart Group',
+      ]) : null,
       // Mute All — only shown when audio is playing
       (hasAudio && !state.selectionMode) ? el('button', {
         class: 'btn btn-audio-mute',
@@ -335,6 +436,27 @@ views.tabs = function (root) {
     ].filter(Boolean)),
   ]);
   panel.appendChild(header);
+
+  // Focus Mode banner — shown when focus mode is active
+  if (state.focusMode.active) {
+    const banner = el('div', { class: 'focus-banner' }, [
+      el('span', { class: 'focus-dot' }),
+      el('span', { class: 'focus-title' }, `Focusing: ${state.focusMode.groupTitle}`),
+      el('span', { id: 'focusTimerDisplay', class: 'focus-timer' }, '0:00'),
+      el('button', {
+        class: 'btn focus-exit-btn',
+        onclick: async () => {
+          await send('EXIT_FOCUS_MODE');
+          clearInterval(_focusTimerInterval);
+          _focusTimerInterval = null;
+          toast('Focus mode ended — tabs restored', 'success');
+          await refreshAll(); render();
+        },
+      }, 'Exit Focus'),
+    ]);
+    panel.appendChild(banner);
+    startFocusTimer();
+  }
 
   const body = el('div', { class: 'panel-body' });
   body.id = 'tabsBody';
@@ -386,11 +508,29 @@ function renderTabList(container) {
   for (const group of state.groups) {
     const tabs = grouped.get(group.id);
     if (!tabs) continue;
-    container.appendChild(el('div', { class: 'group-header' }, [
+    const hdr = el('div', { class: 'group-header' }, [
       el('span', { class: `group-dot group-${group.color}` }),
       el('span', {}, group.title || '(unnamed group)'),
       el('span', { class: 'folder-count' }, `${tabs.length}`),
-    ]));
+      // Focus this group button
+      !state.focusMode.active ? el('button', {
+        class: 'btn btn-icon btn-ghost focus-group-btn',
+        title: `Focus on "${group.title || 'this group'}" — suspend all other tabs`,
+        onclick: async (e) => {
+          e.stopPropagation();
+          await send('ENTER_FOCUS_MODE', { groupId: group.id, groupTitle: group.title || 'Focus Group' });
+          toast(`Focus mode: ${group.title || 'group'}`, 'success');
+          await refreshAll(); render();
+        },
+      }, (() => {
+        const ns = 'http://www.w3.org/2000/svg';
+        const s  = document.createElementNS(ns, 'svg');
+        s.setAttribute('class', 'icon'); s.setAttribute('viewBox', '0 0 24 24');
+        s.innerHTML = '<circle cx="12" cy="12" r="10"/><circle cx="12" cy="12" r="3"/>';
+        return s;
+      })()) : null,
+    ].filter(Boolean));
+    container.appendChild(hdr);
     for (const t of tabs) container.appendChild(tabRow(t));
   }
 
@@ -496,40 +636,6 @@ function renderRecentlyClosed() {
   return wrap;
 }
 
-
-  // Group tabs by groupId; pinned first
-  const pinned = state.tabs.filter((t) => t.pinned);
-  const ungrouped = state.tabs.filter((t) => !t.pinned && (t.groupId === -1 || t.groupId == null));
-  const grouped = new Map();
-  for (const t of state.tabs) {
-    if (t.pinned) continue;
-    if (t.groupId !== -1 && t.groupId != null) {
-      if (!grouped.has(t.groupId)) grouped.set(t.groupId, []);
-      grouped.get(t.groupId).push(t);
-    }
-  }
-
-  if (pinned.length) {
-    container.appendChild(el('div', { class: 'group-header' }, 'Pinned'));
-    for (const t of pinned) container.appendChild(tabRow(t));
-  }
-
-  // Render groups in order they appear
-  for (const group of state.groups) {
-    const tabs = grouped.get(group.id);
-    if (!tabs) continue;
-    const header = el('div', { class: 'group-header' }, [
-      el('span', { class: `group-dot group-${group.color}` }),
-      el('span', {}, group.title || '(unnamed group)'),
-      el('span', { class: 'folder-count' }, `${tabs.length}`),
-    ]);
-    container.appendChild(header);
-    for (const t of tabs) container.appendChild(tabRow(t));
-  }
-
-  for (const t of ungrouped) container.appendChild(tabRow(t));
-
-
 function tabRow(tab) {
   const isSuspended = tab.url?.includes('suspended.html');
   const isSelected  = state.selectedTabIds.has(tab.id);
@@ -601,6 +707,7 @@ function tabRow(tab) {
     el('button', {
       class: 'btn btn-icon btn-ghost',
       title: 'Save to Reading List',
+      'aria-label': 'Save to Reading List',
       onclick: async (e) => {
         e.stopPropagation();
         const ok = await send('SAVE_TO_READING_LIST', { url: tab.url, title: tab.title, favIconUrl: tab.favIconUrl });
@@ -617,6 +724,7 @@ function tabRow(tab) {
     el('button', {
       class: 'btn btn-icon btn-ghost lock-btn' + (isLocked ? ' locked' : ''),
       title: isLocked ? 'Unlock tab (click to allow closing)' : 'Lock tab (prevent accidental close)',
+      'aria-label': isLocked ? 'Unlock tab' : 'Lock tab',
       onclick: async (e) => {
         e.stopPropagation();
         if (isLocked) {
@@ -639,6 +747,7 @@ function tabRow(tab) {
     (isPlaying || isMuted) ? el('button', {
       class: 'btn btn-icon btn-ghost',
       title: isMuted ? 'Unmute tab' : 'Mute tab',
+      'aria-label': isMuted ? 'Unmute tab' : 'Mute tab',
       onclick: async (e) => {
         e.stopPropagation();
         await send('TOGGLE_MUTE_TAB', { tabId: tab.id, muted: !isMuted });
@@ -656,6 +765,7 @@ function tabRow(tab) {
     el('button', {
       class: 'btn btn-icon btn-ghost',
       title: tab.pinned ? 'Unpin' : 'Pin',
+      'aria-label': tab.pinned ? 'Unpin tab' : 'Pin tab',
       onclick: async (e) => {
         e.stopPropagation();
         await send('PIN_TAB', { tabId: tab.id, pinned: !tab.pinned });
@@ -665,6 +775,7 @@ function tabRow(tab) {
     el('button', {
       class: 'btn btn-icon btn-ghost',
       title: 'Suspend',
+      'aria-label': 'Suspend tab',
       onclick: async (e) => {
         e.stopPropagation();
         await send('SUSPEND_TAB', { tabId: tab.id });
@@ -675,6 +786,7 @@ function tabRow(tab) {
     !isLocked ? el('button', {
       class: 'btn btn-icon btn-ghost',
       title: 'Close',
+      'aria-label': `Close tab: ${tab.title || 'untitled'}`,
       onclick: async (e) => {
         e.stopPropagation();
         const { url, title, pinned } = tab;
@@ -1669,6 +1781,127 @@ async function refreshInsights(root, panel, body) {
       b.appendChild(row);
     }
   }
+}
+
+// ===========================================================================
+// SMART AUTO-GROUPING (AI)
+// ===========================================================================
+async function runSmartGrouping() {
+  const btn = document.getElementById('smartGroupBtn');
+  if (btn) { btn.textContent = 'Analyzing…'; btn.disabled = true; }
+
+  try {
+    const result = await send('GET_AI_GROUP_SUGGESTIONS');
+
+    if (result.error === 'no_key') {
+      showNoApiKeyModal();
+      return;
+    }
+    if (result.error) {
+      toast('AI error: ' + result.error, 'error');
+      return;
+    }
+    if (!result.suggestions?.length) {
+      toast('No clear groupings found — try having more related tabs open', 'info');
+      return;
+    }
+    showAiGroupModal(result.suggestions);
+  } catch (e) {
+    toast('Smart grouping failed: ' + e.message, 'error');
+  } finally {
+    if (btn) { btn.textContent = 'Smart Group'; btn.disabled = false; }
+  }
+}
+
+function showNoApiKeyModal() {
+  const backdrop = el('div', { class: 'modal-backdrop' });
+  const modal = el('div', { class: 'modal' }, [
+    el('h3', {}, 'Anthropic API key required'),
+    el('p', { style: 'color:var(--text-dim);font-size:12px;margin-top:6px;line-height:1.6' },
+      'Smart Auto-Grouping uses Claude AI to analyse your tabs. Add your API key in Settings to get started.'),
+    el('div', { class: 'modal-actions' }, [
+      el('button', { class: 'btn', onclick: () => backdrop.remove() }, 'Cancel'),
+      el('button', {
+        class: 'btn btn-primary',
+        onclick: () => { backdrop.remove(); chrome.runtime.openOptionsPage(); },
+      }, 'Open Settings'),
+    ]),
+  ]);
+  backdrop.appendChild(modal);
+  backdrop.addEventListener('click', (e) => { if (e.target === backdrop) backdrop.remove(); });
+  document.body.appendChild(backdrop);
+}
+
+function showAiGroupModal(suggestions) {
+  const backdrop = el('div', { class: 'modal-backdrop' });
+
+  // Track which suggestions are selected (all on by default)
+  const selected = new Set(suggestions.map((_, i) => i));
+
+  const buildModal = () => {
+    backdrop.innerHTML = '';
+    const modal = el('div', { class: 'modal ai-group-modal' });
+    modal.appendChild(el('h3', {}, 'Smart grouping suggestions'));
+    modal.appendChild(el('p', { style: 'font-size:12px;color:var(--text-dim);margin:4px 0 14px' },
+      `Claude found ${suggestions.length} group${suggestions.length === 1 ? '' : 's'}. Select which to apply.`));
+
+    const list = el('div', { class: 'ai-group-list' });
+    suggestions.forEach((s, i) => {
+      const isOn = selected.has(i);
+      const card = el('div', {
+        class: 'ai-group-card' + (isOn ? ' selected' : ''),
+        onclick: () => {
+          if (selected.has(i)) selected.delete(i); else selected.add(i);
+          buildModal();
+        },
+      }, [
+        el('div', { class: 'ai-group-card-head' }, [
+          el('span', { class: `ai-group-check ${isOn ? 'on' : ''}` }, isOn ? '✓' : ''),
+          el('span', { class: `group-dot group-${s.color}`, style: 'width:10px;height:10px;border-radius:50%;flex-shrink:0' }),
+          el('span', { class: 'ai-group-name' }, s.name),
+          el('span', { class: 'ai-group-count' }, `${s.tabs.length} tabs`),
+        ]),
+        el('div', { class: 'ai-group-tabs' },
+          s.tabs.map((t) => {
+            const row = el('div', { class: 'ai-tab-row' });
+            const fav = el('img', { src: t.favIconUrl || defaultFaviconDataUri(), alt: '', class: 'fav' });
+            fav.onerror = () => { fav.src = defaultFaviconDataUri(); };
+            row.appendChild(fav);
+            row.appendChild(el('span', { class: 'ai-tab-title' }, t.title || t.url));
+            return row;
+          })
+        ),
+      ]);
+      list.appendChild(card);
+    });
+    modal.appendChild(list);
+
+    const count = selected.size;
+    modal.appendChild(el('div', { class: 'modal-actions' }, [
+      el('button', { class: 'btn', onclick: () => backdrop.remove() }, 'Cancel'),
+      el('button', {
+        class: 'btn btn-primary',
+        disabled: count === 0,
+        onclick: async () => {
+          backdrop.remove();
+          let applied = 0;
+          for (const i of selected) {
+            const s = suggestions[i];
+            const res = await send('APPLY_AI_GROUP', { name: s.name, color: s.color, tabIds: s.tabIds });
+            if (res !== null) applied++;
+          }
+          toast(`Applied ${applied} group${applied === 1 ? '' : 's'}`, 'success');
+          await refreshAll(); render();
+        },
+      }, count === 0 ? 'Select groups to apply' : `Apply ${count} group${count === 1 ? '' : 's'}`),
+    ]));
+
+    backdrop.appendChild(modal);
+  };
+
+  buildModal();
+  backdrop.addEventListener('click', (e) => { if (e.target === backdrop) backdrop.remove(); });
+  document.body.appendChild(backdrop);
 }
 
 init();

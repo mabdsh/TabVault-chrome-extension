@@ -206,3 +206,13 @@ export function modalConfirm(title, message) {
     document.body.appendChild(backdrop);
   });
 }
+
+// Recursively collect all bookmark leaf nodes (items with a URL) from a
+// Chrome bookmarks tree into a flat array. Shared by popup.js and sidebar.js.
+export function flatten(nodes, out = []) {
+  for (const n of nodes) {
+    if (n.url) out.push(n);
+    if (n.children) flatten(n.children, out);
+  }
+  return out;
+}
